@@ -27,10 +27,12 @@ than guessed at.
 import re
 from typing import Any
 
+from app.linkedin.flight import extract_text_stream
 from app.models import (
     BonusItem,
     Certification,
     DateRange,
+    Experience,
     Language,
     ProfileImage,
     ProfileResponse,
@@ -169,6 +171,205 @@ def _parse_bonus_section(raw: dict | None, resource: str) -> list[BonusItem]:
     return items
 
 
+_DATE_RANGE_RE = re.compile(
+    r"^([A-Z][a-z]{2} \d{4}|\d{4}) - (Present|[A-Z][a-z]{2} \d{4}|\d{4})(?:\s*·\s*.+)?$"
+)
+_LOCATION_RE = re.compile(r"^.+ · (On-site|Remote|Hybrid)$")
+_EMPLOYMENT_TYPES = {
+    "Full-time", "Part-time", "Internship", "Contract", "Freelance",
+    "Self-employed", "Trainee", "Apprenticeship", "Seasonal",
+}
+_COMPANY_TYPE_RE = re.compile(
+    r"^(.+?) · (" + "|".join(re.escape(t) for t in _EMPLOYMENT_TYPES) + r")$"
+)
+_HASH_CLASS_RE = re.compile(r"^[_a-f0-9]{6,}( [_a-f0-9]{6,})*$")
+_NOISE_TOKENS = {"more", "Expanded", "Collapsed", "br", "open"}
+_POSITION_ID_RE = re.compile(r"^\d{6,}$")
+_ID_LIKE_RE = re.compile(r"^[A-Za-z0-9]{16,}$")
+_DURATION_ONLY_RE = re.compile(r"^\d+\s+(mos?|yrs?)$")
+# UI style/property values (font, alignment, sizing, generic tag names) that
+# leak into the text stream alongside real content. Recognized generically —
+# a single lowercase-leading word, no spaces — rather than by exact value,
+# since enumerating every style token LinkedIn's design system might use
+# would be a losing game.
+_STYLE_TOKEN_RE = re.compile(r"^[a-z][A-Za-z0-9_-]{0,19}$")
+
+
+def _is_noise_token(token: str) -> bool:
+    if token in _NOISE_TOKENS:
+        return True
+    if _HASH_CLASS_RE.match(token):
+        return True
+    if token.startswith(("$", "proto.", "com.linkedin.sdui", "/in/", "expandable_text_block_")):
+        return True
+    if "auto-component-" in token or "auto-binding-" in token:
+        return True
+    if re.fullmatch(r"\d+", token):
+        return True
+    if re.fullmatch(r"\d+x", token):
+        return True
+    if token.startswith("var(--") and token.endswith(")"):
+        return True
+    if _ID_LIKE_RE.match(token):
+        return True
+    if _STYLE_TOKEN_RE.match(token):
+        return True
+    return False
+
+
+def _find_next_meaningful(tokens: list[str], start: int, limit: int = 12) -> str | None:
+    for k in range(start, min(start + limit, len(tokens))):
+        if not _is_noise_token(tokens[k]):
+            return tokens[k]
+    return None
+
+
+def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
+    """Experimental — see README "How this was reverse engineered" and
+    "Known limitations". Heuristically reconstructs Experience entries from
+    LinkedIn's SDUI "Flight" wire format response (an internal React Server
+    Components protocol, not a documented API). This scans the flattened,
+    ordered visible-text stream for recognizable landmarks — date ranges,
+    "<location> · On-site/Remote/Hybrid" lines, "<company> · <employment
+    type>" lines — and groups text around them.
+
+    Known weak points: title comes from a different part of the component
+    tree than dates/location/description (matched positionally by order,
+    which can misalign for unusual profile layouts), and description
+    extraction is a token-noise heuristic, not a real field. Never raises —
+    returns whatever it could parse, empty list on total failure, since this
+    is explicitly best-effort on top of an unofficial internal protocol.
+    """
+    if not raw_text:
+        return []
+
+    try:
+        tokens = extract_text_stream(raw_text)
+    except Exception:
+        return []
+
+    # Each position id appears twice in the stream: once next to its real
+    # title (near a "ProfilePositionEditForm" marker), once again later next
+    # to an unrelated "<Title> at <Company>" screen title (for the "skill
+    # associations" overlay). Only the first occurrence per id is a title.
+    titles: list[str] = []
+    seen_position_ids: set[str] = set()
+    for i, tok in enumerate(tokens):
+        if _POSITION_ID_RE.match(tok) and tok not in seen_position_ids:
+            for j in range(i + 1, min(i + 5, len(tokens))):
+                if tokens[j].startswith("ProfilePositionEditForm") or tokens[j].startswith(
+                    "com.linkedin.sdui.flagshipnav.profile.ProfilePositionEditForm"
+                ):
+                    break
+                if not _is_noise_token(tokens[j]):
+                    titles.append(tokens[j])
+                    seen_position_ids.add(tok)
+                    break
+
+    roles: list[dict] = []
+    current_company: str | None = None
+    current_type: str | None = None
+    current_location: str | None = None
+    i, n = 0, len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if _DURATION_ONLY_RE.match(tok):
+            i += 1
+            continue
+        company_match = _COMPANY_TYPE_RE.match(tok)
+        if company_match:
+            current_company, current_type = company_match.group(1), company_match.group(2)
+            i += 1
+            continue
+        if tok in _EMPLOYMENT_TYPES:
+            current_type = tok
+            i += 1
+            continue
+        if _LOCATION_RE.match(tok):
+            current_location = tok
+            i += 1
+            continue
+        date_match = _DATE_RANGE_RE.match(tok)
+        if date_match:
+            start, end = date_match.group(1), date_match.group(2)
+            j = i + 1
+            # A location shortly after this date range (skipping intervening
+            # noise tokens — CSS var refs, single-letter tag markers) belongs
+            # to this specific role (single-role company layout). Otherwise
+            # fall back to the most recently seen location, which for a
+            # multi-role company is shared (it appears once, before any dates).
+            peek = j
+            while peek < n and _is_noise_token(tokens[peek]) and peek - j < 12:
+                peek += 1
+            if peek < n and _LOCATION_RE.match(tokens[peek]):
+                current_location = tokens[peek]
+                j = peek + 1
+            location = current_location
+            desc_parts = []
+            while j < n:
+                nxt = tokens[j]
+                if (
+                    _COMPANY_TYPE_RE.match(nxt)
+                    or nxt in _EMPLOYMENT_TYPES
+                    or _DATE_RANGE_RE.match(nxt)
+                    or nxt.startswith(("com.linkedin.sdui", "proto.sdui", "Show all"))
+                ):
+                    break
+                if nxt in titles:
+                    # A card's title heading occasionally renders structurally
+                    # near an adjacent role's content — skip it rather than
+                    # treat it as this role's description or stop collecting.
+                    j += 1
+                    continue
+                if not _is_noise_token(nxt) and not _LOCATION_RE.match(nxt):
+                    desc_parts.append(nxt)
+                j += 1
+            roles.append(
+                {
+                    "company": current_company,
+                    "start": start,
+                    "end": None if end == "Present" else end,
+                    "location": location,
+                    "description": "\n".join(desc_parts) if desc_parts else None,
+                }
+            )
+            i = j
+            continue
+        # Bare company name (no " · <type>" suffix on the same line) — only
+        # when the next token confirms it's a company header, not stray text.
+        next_meaningful = _find_next_meaningful(tokens, i + 1)
+        if (
+            not _is_noise_token(tok)
+            and tok not in titles
+            and next_meaningful is not None
+            and (
+                _DURATION_ONLY_RE.match(next_meaningful)
+                or next_meaningful in _EMPLOYMENT_TYPES
+                or _LOCATION_RE.match(next_meaningful)
+                or _DATE_RANGE_RE.match(next_meaningful)
+            )
+        ):
+            current_company = tok
+            current_type = None
+            current_location = None
+            i += 1
+            continue
+        i += 1
+
+    experiences = []
+    for idx, role in enumerate(roles):
+        experiences.append(
+            Experience(
+                title=titles[idx] if idx < len(titles) else None,
+                company=role["company"],
+                location=role["location"],
+                date_range=DateRange(start=role["start"], end=role["end"]),
+                description=role["description"],
+            )
+        )
+    return experiences
+
+
 def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:
     html = raw.get("html", "")
     subresources: dict[str, dict | None] = raw.get("subresources", {})
@@ -181,7 +382,7 @@ def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:
         headline=mini_profile.get("occupation") if mini_profile else None,
         location=None,  # not currently extracted — see README known limitations
         about=None,  # not currently extracted — see README known limitations
-        experience=[],  # endpoint retired by LinkedIn — see README known limitations
+        experience=parse_experience_from_flight(raw.get("experience_flight")),
         education=[],  # endpoint retired by LinkedIn — see README known limitations
         skills=[],  # endpoint retired by LinkedIn — see README known limitations
         certifications=_parse_certifications(subresources.get("certifications")),

@@ -26,6 +26,8 @@ version, confirmed live against a real account:
   that wasn't fully cracked — see README known limitations.
 """
 
+import base64
+import os
 import re
 
 import httpx
@@ -52,6 +54,62 @@ SUBRESOURCES = [
     "organizations",
     "volunteerExperiences",
 ]
+
+# Captured live via HAR export while scrolling to the Experience section (see
+# README). This "component" action renders one profile card server-side and
+# streams back a React Server Components ("Flight") response — not JSON.
+# componentId/sduiid are static strings, the same for every profile; only the
+# vanity name (embedded both as a plain field and inside each binding-state
+# key) varies. Unlike the edit-form action captured in the same session, this
+# one uses no random per-session UUID, which is what makes it replicable
+# outside a live browser.
+#
+# "education" and "skills" below are guesses following the same naming
+# convention as "experience" — NOT confirmed. "education" was tested live and
+# returns 500 (wrong componentId, not a real access/validation error), so the
+# real id for it uses some other naming scheme that wasn't found in the time
+# available. Kept here, unused by fetch_all_raw, as a documented starting
+# point for extending this further — see README known limitations.
+SDUI_COMPONENT_IDS = {
+    "experience": "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsExperienceOnly",
+    "education": "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsEducationOnly",  # confirmed wrong (500)
+    "skills": "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsSkillsOnly",  # unverified guess
+}
+
+_SDUI_COMPONENT_BODY_TEMPLATE = (
+    '{{"clientArguments":{{"payload":{{"isSelfView":false,"vanityName":"{v}",'
+    '"replaceableSectionArgs":{{"vanityName":"{v}","hideCardsForGoldenGate":false,'
+    '"shouldSetupReplaceableComponent":true,"isSelfView":false,"isSelfViewResolved":false}},'
+    '"profileComponentState":{{"profileId":"{v}",'
+    '"shouldRefreshScreenOnReappear":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateShouldRefreshScreen{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"shouldFetchFromCache":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateFetchFromCache{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"loadedSections":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateLoadedProfileSections{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"shouldDisplayTabAnchors":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateShouldDisplayTabAnchors{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"shouldReloadTopCardOnReappear":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateShouldReloadTopCardOnReappear{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"deferredTopCardReloadProfileId":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateDeferredTopCardReloadProfileId{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"shouldDisplayStickyHeader":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateShouldDisplayStickyHeader{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"shouldRefreshLanguageDetailScreen":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateShouldRefreshLanguageDetails{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"lastPerformedActionRef":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateLastPerformedActionRef{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"shouldFocusOnReappear":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateShouldFocusOnReappear{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"shouldFocusFeaturedOnReappear":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateShouldFocusFeaturedOnReappear{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"lastFeaturedActionRef":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateLastFeaturedActionRef{v}ProfileComponentState","namespace":"MemoryNamespace"}}}},'
+    '"shouldHideProfileCards":{{"type":"com.linkedin.sdui.components.core.BindingImpl",'
+    '"value":{{"key":"ProfileComponentStateProfileHideCards{v}ProfileComponentState","namespace":"MemoryNamespace"}}}}}}}},'
+    '"states":[],"requestMetadata":{{"$type":"proto.sdui.common.RequestMetadata"}},'
+    '"screenId":"com.linkedin.sdui.flagshipnav.profile.Profile","knownTemplateIds":[]}}}}'
+)
 
 # Matches the member URN LinkedIn embeds in the server-rendered hydration JSON
 # on a profile page. Confirmed live: modern profile pages embed
@@ -163,10 +221,40 @@ class VoyagerClient:
         self._check_auth_response(response, public_identifier)
         return response.json()
 
+    def fetch_sdui_component_raw(self, public_identifier: str, component_key: str) -> str:
+        """Experimental — see module docstring and README. Returns the raw
+        response text (React Server Components "Flight" wire format, not
+        JSON) for one profile card. Only "experience" is confirmed to be the
+        right componentId; "education"/"skills" are guesses following the
+        same naming pattern and may 404 or return something else entirely."""
+        component_id = SDUI_COMPONENT_IDS[component_key]
+        span_id = base64.b64encode(os.urandom(8)).decode()
+        url = (
+            "/flagship-web/rsc-action/actions/component"
+            f"?componentId={component_id}&sduiid={component_id}&parentSpanId={span_id}"
+        )
+        headers = {
+            "content-type": "application/json",
+            "x-li-rsc-stream": "true",
+            "x-li-anchor-page-key": "d_flagship3_profile_view_base",
+            "origin": "https://www.linkedin.com",
+            "referer": f"https://www.linkedin.com/in/{public_identifier}/",
+        }
+        body = _SDUI_COMPONENT_BODY_TEMPLATE.format(v=public_identifier)
+        response = self._client.post(url, content=body, headers=headers)
+        self._check_auth_response(response, public_identifier)
+        return response.text
+
     def fetch_all_raw(self, public_identifier: str) -> dict:
         html = self.fetch_profile_html(public_identifier)
         subresources = {
             resource: self.fetch_subresource_raw(public_identifier, resource)
             for resource in SUBRESOURCES
         }
-        return {"html": html, "subresources": subresources}
+        try:
+            experience_flight = self.fetch_sdui_component_raw(public_identifier, "experience")
+        except Exception:
+            # Experimental path on top of an unofficial internal protocol —
+            # never let it take down the rest of the response. See README.
+            experience_flight = None
+        return {"html": html, "subresources": subresources, "experience_flight": experience_flight}

@@ -1,9 +1,10 @@
 import json
 from pathlib import Path
 
-from app.linkedin.parser import parse_profile
+from app.linkedin.parser import parse_experience_from_flight, parse_profile
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_profile_response.json"
+EXPERIENCE_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "experience_flight_sample.txt"
 
 
 def load_fixture() -> dict:
@@ -75,12 +76,60 @@ def test_bonus_subtitle_drops_unresolved_urn_references():
     assert urn_project.subtitle is None
 
 
-def test_experience_education_skills_always_empty():
+def test_education_and_skills_always_empty():
+    profile = parse_profile(load_fixture(), public_identifier="janedoe")
+
+    assert profile.education == []
+    assert profile.skills == []
+
+
+def test_experience_empty_without_flight_data():
     profile = parse_profile(load_fixture(), public_identifier="janedoe")
 
     assert profile.experience == []
-    assert profile.education == []
-    assert profile.skills == []
+
+
+def test_parses_experience_from_real_captured_flight_response():
+    # Real response captured live (see README "How this was reverse
+    # engineered") from the experimental SDUI "component" action — not
+    # synthetic, unlike the other fixtures. Multi-role-same-company
+    # (Delhivery) and single-role (Prabha, Satyam) layouts differ in the
+    # underlying wire format, so this exercises both code paths at once.
+    text = EXPERIENCE_FLIGHT_FIXTURE.read_text()
+    experiences = parse_experience_from_flight(text)
+
+    assert len(experiences) == 4
+
+    role1, role2, role3, role4 = experiences
+
+    assert role1.title == "Software Developer"
+    assert role1.company == "Delhivery"
+    assert role1.location == "Pune District, Maharashtra, India · On-site"
+    assert role1.date_range.start == "Jul 2026"
+    assert role1.date_range.end is None  # "Present"
+
+    assert role2.title == "Software Developer"
+    assert role2.company == "Delhivery"
+    assert role2.date_range.start == "Nov 2025"
+    assert role2.date_range.end == "Jul 2026"
+
+    assert role3.title == "Information Technology Intern"
+    assert role3.company == "Prabha Industries - India"
+    assert role3.location == "Bengaluru, Karnataka, India · On-site"
+    assert role3.date_range.start == "Jun 2024"
+    assert role3.date_range.end == "Aug 2024"
+    assert "Designed and developed a comprehensive company website" in role3.description
+
+    assert role4.title == "Information Technology Intern"
+    assert role4.company == "Satyam Technocrats"
+    assert role4.location == "Nashik, Maharashtra, India · On-site"
+    assert "I had the opportunity to work as an I.T Intern" in role4.description
+
+
+def test_experience_parser_never_raises_on_garbage_input():
+    assert parse_experience_from_flight("not a real flight response") == []
+    assert parse_experience_from_flight("") == []
+    assert parse_experience_from_flight(None) == []
 
 
 def test_handles_missing_mini_profile_gracefully():
