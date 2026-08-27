@@ -168,6 +168,35 @@ missing the rest (see "Known limitations").
 With this, every core field the assignment asked for is populated with real
 data except `about` and `location` — see limitations below for exactly why.
 
+**Validated against a genuinely different, third-party profile.** Every
+capture above came from viewing my own profile — which turns out to matter:
+LinkedIn renders an "edit" affordance next to your own positions (you can
+edit them), and the experience parser's title extraction originally leaned on
+that landmark. Testing against someone else's public profile surfaced real,
+third-party-specific layout differences the self-view captures never
+exercised:
+
+- No edit affordance exists on someone else's profile, so the title renders
+  as plain inline text instead — right before its employment type, or right
+  before a combined "Company · Type" line for a single-role company.
+- A role active under a month shows a single date with no range at all
+  (`"Aug 2026 · 1 mo"`), not the `"<start> - <end>"` format every self-view
+  role happened to use.
+- Location itself has two more formats beyond the one self-view showed: bare
+  workplace type with no city (`"Remote"`, no `"<city> · "` prefix), and a
+  bare city/state/country address with no workplace-type suffix at all
+  (`"Bengaluru, Karnataka, India"`).
+
+All four were fixed and re-verified — the parser now correctly reconstructs a
+different person's mixed single- and multi-role-company experience layout,
+title/company/location/dates/description all matching the real page. One
+finding this test also confirmed *live*, not just theoretically: Education
+and Skills require a `MiniProfile` id sourced opportunistically from bonus
+subresources (certifications/projects/etc.), and a profile with none of that
+content populated — as this one had — means Education/Skills come back empty
+even though the profile visibly has both. Real limitation, now demonstrated
+rather than just documented.
+
 ## Architecture
 
 ```

@@ -10,6 +10,9 @@ from app.linkedin.parser import (
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_profile_response.json"
 EXPERIENCE_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "experience_flight_sample.txt"
+EXPERIENCE_FLIGHT_THIRDPARTY_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "experience_flight_thirdparty_sample.txt"
+)
 EDUCATION_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "education_flight_sample.txt"
 SKILLS_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "skills_flight_sample.txt"
 
@@ -186,6 +189,41 @@ def test_parses_experience_from_real_captured_flight_response():
     assert role4.company == "Satyam Technocrats"
     assert role4.location == "Nashik, Maharashtra, India · On-site"
     assert "I had the opportunity to work as an I.T Intern" in role4.description
+
+
+def test_parses_experience_from_real_thirdparty_profile():
+    # Real response captured live from a DIFFERENT person's profile (not the
+    # account whose cookie made the request) — see README "Validated against
+    # a genuinely different, third-party profile". Exercises layout
+    # differences self-view never shows: inline title text (no edit-form
+    # landmark), a single-date-no-range role ("Aug 2026 · 1 mo"), bare
+    # "Remote" with no city prefix, and a bare city/state/country address
+    # with no workplace-type suffix.
+    text = EXPERIENCE_FLIGHT_THIRDPARTY_FIXTURE.read_text()
+    experiences = parse_experience_from_flight(text)
+
+    assert len(experiences) == 3
+
+    role1, role2, role3 = experiences
+
+    assert role1.title == "Computer vision intern"
+    assert role1.company == "MacV AI"
+    assert role1.location == "Remote"
+    assert role1.date_range.start == "Jan 2026"
+    assert role1.date_range.end is None
+
+    assert role2.title == "Computer Vision Engineer"
+    assert role2.company == "MacV AI"
+    assert role2.location == "Remote"
+    assert role2.date_range.start == "Aug 2026"
+    assert role2.date_range.end is None
+
+    assert role3.title == "Computer vision intern"
+    assert role3.company == "Pramana"
+    assert role3.location == "Bengaluru, Karnataka, India"
+    assert role3.date_range.start == "May 2025"
+    assert role3.date_range.end == "Dec 2025"
+    assert role3.description is None
 
 
 def test_experience_parser_never_raises_on_garbage_input():

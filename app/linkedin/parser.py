@@ -213,6 +213,8 @@ _DURATION_ONLY_RE = re.compile(r"^\d+\s+(mos?|yrs?)$")
 # since enumerating every style token LinkedIn's design system might use
 # would be a losing game.
 _STYLE_TOKEN_RE = re.compile(r"^[a-z][A-Za-z0-9_-]{0,19}$")
+# CSS dimension values that leak through alongside real content, e.g. "10.8rem".
+_CSS_DIMENSION_RE = re.compile(r"^\d+(\.\d+)?(rem|px|em|vh|vw|%)$")
 
 
 def _is_noise_token(token: str) -> bool:
@@ -229,6 +231,17 @@ def _is_noise_token(token: str) -> bool:
     if re.fullmatch(r"\d+x", token):
         return True
     if token.startswith("var(--") and token.endswith(")"):
+        return True
+    if _CSS_DIMENSION_RE.match(token):
+        return True
+    # LinkedIn's "you were referred by this job posting" promo banner —
+    # UI chrome, never user-authored content.
+    if "LinkedIn helped me get this job" in token or token == "helped me get this job":
+        return True
+    # PDF/attachment thumbnail labels ("Thumbnail for X.pdf", or a bare
+    # filename) — not description content, and not reliably attributable to
+    # the right role even when it is (see README known limitations).
+    if token.startswith("Thumbnail for ") or re.fullmatch(r".+\.pdf", token):
         return True
     if _ID_LIKE_RE.match(token):
         return True
