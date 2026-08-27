@@ -134,6 +134,23 @@ _SDUI_EDUCATION_PAGINATION_BODY_TEMPLATE = (
     '"requestMetadata":{{"$type":"proto.sdui.common.RequestMetadata"}}}}}}}}'
 )
 
+_SDUI_SKILLS_PAGINATION_BODY_TEMPLATE = (
+    '{{"pagerId":"com.linkedin.sdui.pagers.profile.details.skills",'
+    '"clientArguments":{{"$type":"proto.sdui.actions.requests.RequestedArguments","requestedStateKeys":[],'
+    '"payload":{{"vanityName":"{v}","profileId":"{p}","start":0,"count":10,'
+    '"filter":"ProfileSkillCategory_ALL"}},'
+    '"requestMetadata":{{"$type":"proto.sdui.common.RequestMetadata"}},"states":[],'
+    '"screenId":"com.linkedin.sdui.flagshipnav.profile.ProfileSkillDetails","knownTemplateIds":[]}},'
+    '"paginationRequest":{{"$type":"proto.sdui.actions.requests.PaginationRequest",'
+    '"pagerId":"com.linkedin.sdui.pagers.profile.details.skills",'
+    '"trigger":{{"$case":"itemDistanceTrigger","itemDistanceTrigger":'
+    '{{"$type":"proto.sdui.actions.requests.ItemDistanceTrigger","preloadDistance":3,"preloadLength":250}}}},'
+    '"retryCount":2,"requestedArguments":{{"$type":"proto.sdui.actions.requests.RequestedArguments",'
+    '"requestedStateKeys":[],"payload":{{"vanityName":"{v}","profileId":"{p}","start":0,"count":10,'
+    '"filter":"ProfileSkillCategory_ALL"}},'
+    '"requestMetadata":{{"$type":"proto.sdui.common.RequestMetadata"}}}}}}}}'
+)
+
 # Matches the member URN LinkedIn embeds in the server-rendered hydration JSON
 # on a profile page. Confirmed live: modern profile pages embed
 # "urn:li:member:<id>" (not "urn:li:fsd_profile:..." as older writeups
@@ -311,6 +328,28 @@ class VoyagerClient:
         self._check_auth_response(response, public_identifier)
         return response.text
 
+    def fetch_sdui_skills_raw(self, public_identifier: str, profile_id: str) -> str:
+        """Experimental — see module docstring and README. Same "pagination"
+        action type as education, captured live from `/in/{id}/details/skills/`.
+        Also requires the profile's opaque encoded id. Returns raw Flight-
+        format text."""
+        span_id = base64.b64encode(os.urandom(8)).decode()
+        url = (
+            "/flagship-web/rsc-action/actions/pagination"
+            f"?sduiid=com.linkedin.sdui.pagers.profile.details.skills&parentSpanId={span_id}"
+        )
+        headers = {
+            "content-type": "application/json",
+            "x-li-rsc-stream": "true",
+            "x-li-anchor-page-key": "d_flagship3_profile_view_base_skills_details",
+            "origin": "https://www.linkedin.com",
+            "referer": f"https://www.linkedin.com/in/{public_identifier}/details/skills/",
+        }
+        body = _SDUI_SKILLS_PAGINATION_BODY_TEMPLATE.format(v=public_identifier, p=profile_id)
+        response = self._client.post(url, content=body, headers=headers)
+        self._check_auth_response(response, public_identifier)
+        return response.text
+
     def fetch_all_raw(self, public_identifier: str) -> dict:
         html = self.fetch_profile_html(public_identifier)
         subresources = {
@@ -325,16 +364,22 @@ class VoyagerClient:
             experience_flight = None
 
         education_flight = None
+        skills_flight = None
         profile_id = _extract_mini_profile_id(subresources)
         if profile_id:
             try:
                 education_flight = self.fetch_sdui_education_raw(public_identifier, profile_id)
             except Exception:
                 education_flight = None
+            try:
+                skills_flight = self.fetch_sdui_skills_raw(public_identifier, profile_id)
+            except Exception:
+                skills_flight = None
 
         return {
             "html": html,
             "subresources": subresources,
             "experience_flight": experience_flight,
             "education_flight": education_flight,
+            "skills_flight": skills_flight,
         }

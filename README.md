@@ -1,10 +1,11 @@
 # LinkedIn Profile API
 
-Given a LinkedIn profile URL, returns structured JSON — name, headline, profile
-images, certifications, languages, plus several bonus sections beyond what was
-asked (projects, publications, volunteer experience, and more). No browser is
-used anywhere at runtime: every call is a plain HTTP request built to look like
-the ones LinkedIn's own web app makes.
+Given a LinkedIn profile URL, returns structured JSON — name, headline,
+experience, education, skills, certifications, languages, profile images —
+plus several bonus sections beyond what was asked (projects, publications,
+volunteer experience, and more). No browser is used anywhere at runtime: every
+call is a plain HTTP request built to look like the ones LinkedIn's own web
+app makes.
 
 ## How this was reverse engineered
 
@@ -145,10 +146,27 @@ location/description noise to work around), and `parse_education_from_flight()`
 reconstructs it cleanly — verified against a real 3-entry response spanning a
 university and two schools (`tests/fixtures/education_flight_sample.txt`).
 
-**Skills remains unsolved.** Neither the `component` nor the `pagination`
-action's id for it was found in the time available — see "Known limitations."
-Given skills is also among the fields LinkedIn killed the classic REST
-endpoint for, this is the same anti-scraping boundary showing up a third time.
+**Attempt 6 — Skills, found the fast way.** Rather than guess again, this
+capture explicitly scrolled through Education, Projects, Skills, and
+Certifications together in one HAR before searching it — and the Skills
+pagination request was already sitting in that same list, using the same
+`pagination` action as Education:
+
+```
+POST /flagship-web/rsc-action/actions/pagination
+     ?sduiid=com.linkedin.sdui.pagers.profile.details.skills
+     &parentSpanId=<any base64 string>
+```
+
+Its Flight response is the simplest of the three: skill names come reliably
+from `"Edit <Name> skill"` edit-form landmark text, no date ranges or
+company/location disambiguation needed. One real gap: LinkedIn paginates
+skills 10 at a time (`start`/`count` in the request body), and only the first
+page is currently fetched — a profile with more than 10 skills will be
+missing the rest (see "Known limitations").
+
+With this, every core field the assignment asked for is populated with real
+data except `about` and `location` — see limitations below for exactly why.
 
 ## Architecture
 
@@ -160,15 +178,16 @@ FastAPI app (app/main.py)
   │  validate URL, check cache
   ▼
 VoyagerClient.fetch_all_raw() (app/linkedin/client.py)
-  │  1. GET /in/{public_identifier}/                 → page HTML (name via <title>)
+  │  1. GET /in/{public_identifier}/                    → page HTML (name via <title>)
   │  2. GET .../certifications, /languages,
-  │        /projects, /honors, ... (x10)              → subresource JSON
-  │                                                      (also yields MiniProfile:
-  │                                                       headline, photo, encoded id)
-  │  3. POST .../actions/component      (Experience)  → React Flight-format streams
-  │     POST .../actions/pagination     (Education)      (experimental — see
-  │        (needs the encoded id from step 2)              "How this was reverse
-  │                                                          engineered")
+  │        /projects, /honors, ... (x10)                 → subresource JSON
+  │                                                         (also yields MiniProfile:
+  │                                                          headline, photo, encoded id)
+  │  3. POST .../actions/component       (Experience)   → React Flight-format streams
+  │     POST .../actions/pagination      (Education,       (experimental — see
+  │                                        Skills)           "How this was reverse
+  │        (Education/Skills need the encoded id            engineered")
+  │         from step 2)
   ▼
 app/linkedin/flight.py → resolves Flight chunks, extracts visible text
   ▼
@@ -203,7 +222,7 @@ Other diagnostic scripts used during development, kept for reference:
 - `scripts/probe_endpoints.py <id>` — checks which per-section endpoints are alive
 - `scripts/inspect_html.py <id> "<phrase>"` — checks whether a phrase from the profile is server-rendered into the page HTML
 - `scripts/inspect_sdui.py <id> [experience|education|skills]` — tests the experimental SDUI "component" action directly
-- `scripts/inspect_education.py <id> <profile_id>` — tests the experimental SDUI "pagination" action for Education
+- `scripts/inspect_education.py <id> <profile_id>` / `scripts/inspect_skills.py <id> <profile_id>` — test the experimental SDUI "pagination" action for each section
 - `scripts/list_rsc_actions.py <har-file>` / `scripts/dump_har_entry.py <har-file> <index>` — inspect a HAR capture to find new SDUI actions
 - `scripts/parse_sdui_flight.py <path>` / `scripts/debug_tokens.py <path> <token>` — inspect a raw Flight response
 - `scripts/test_experience_parser.py <path>` / `scripts/test_education_parser.py <path>` — run the parsers against a saved response without a live fetch
@@ -251,7 +270,7 @@ Response `200` (see `app/models.py` for the full schema):
       "description": null
     }
   ],
-  "skills": [],
+  "skills": [ { "name": "PostgreSQL" }, { "name": "Docker" } ],
   "certifications": [
     { "name": "...", "issuer": "...", "issued_date": "2023-1", "credential_id": null, "credential_url": "..." }
   ],
@@ -288,28 +307,30 @@ Liveness check for deployment platforms.
 
 ## Known limitations
 
-- **Experience and Education rely on an experimental, undocumented protocol.**
-  Both parsers reverse engineer LinkedIn's internal SDUI/React Server
-  Components wire format, reconstructed by hand from real captures — not a
-  documented or stable API, and *two different* action types at that
-  (`component` vs `pagination`). Either could break if LinkedIn changes this
-  internal format; both fetches are wrapped so a failure never takes down the
-  rest of the response (that section just comes back empty). Field accuracy
-  is best-effort, verified only against the layouts actually captured:
+- **Experience, Education, and Skills all rely on an experimental,
+  undocumented protocol.** All three parsers reverse engineer LinkedIn's
+  internal SDUI/React Server Components wire format, reconstructed by hand
+  from real captures — not a documented or stable API, and *two different*
+  action types at that (`component` for Experience, `pagination` for
+  Education/Skills). Any of them could break if LinkedIn changes this internal
+  format; every fetch is wrapped so a failure never takes down the rest of the
+  response (that section just comes back empty). Field accuracy is
+  best-effort, verified only against the layouts actually captured:
   Experience's title-matching and description extraction are heuristics tuned
   against a multi-role-same-company + two single-role-company layout (career
   breaks, self-employment, very long histories untested); Education's parser
   is simpler and more regular but was only verified against a
-  university-plus-two-schools layout.
-- **Education additionally depends on a MiniProfile entity being available**
-  (same opportunistic source as headline/photo — see below) to supply the
-  profile's encoded id, which its request requires. A profile with no
-  content in `projects`/other bonus sections won't surface this, in which
-  case education comes back empty even if education data exists.
-- **Skills is not returned.** LinkedIn retired its classic REST endpoint
-  (`410 Gone`, confirmed live), and neither SDUI action's id for it was found
-  in the time available — see "How this was reverse engineered." Always
-  returned as an empty list.
+  university-plus-two-schools layout; Skills' parser is the most reliable of
+  the three (a single reliable text landmark, no date/location disambiguation).
+- **Skills only returns the first page (10).** LinkedIn paginates skills via
+  `start`/`count` in the request body; only `start=0` is fetched, so a profile
+  with more than 10 skills will be missing the rest. Extending this to loop
+  until an empty page would be a small, mechanical follow-up.
+- **Education and Skills additionally depend on a MiniProfile entity being
+  available** (same opportunistic source as headline/photo — see below) to
+  supply the profile's encoded id, which both their requests require. A
+  profile with no content in `projects`/other bonus sections won't surface
+  this, in which case both come back empty even if the data exists.
 - **`about` and `location` are not currently extracted.** They may be
   server-rendered into the page HTML like the name is, but that wasn't
   confirmed, so rather than guess at fragile selectors, these fields are

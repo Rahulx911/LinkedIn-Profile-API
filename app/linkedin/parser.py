@@ -40,6 +40,7 @@ from app.models import (
     Language,
     ProfileImage,
     ProfileResponse,
+    Skill,
 )
 
 TITLE_PATTERN = re.compile(r"<title>(.*?)\s*\|\s*LinkedIn</title>", re.IGNORECASE | re.DOTALL)
@@ -438,6 +439,35 @@ def parse_education_from_flight(raw_text: str | None) -> list[Education]:
     return education
 
 
+_SKILL_EDIT_PREFIX_RE = re.compile(r"^Edit (.+) skill$")
+
+
+def parse_skills_from_flight(raw_text: str | None) -> list[Skill]:
+    """Experimental — see README. Same SDUI "pagination" protocol as
+    education. Skill names come reliably from "Edit <Name> skill" edit-form
+    landmark text, deduped in order. Note: this only covers one page of
+    results (LinkedIn paginates skills 10 at a time; only the first page is
+    fetched — see README known limitations). Never raises."""
+    if not raw_text:
+        return []
+
+    try:
+        tokens = extract_text_stream(raw_text)
+    except Exception:
+        return []
+
+    skills: list[Skill] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        match = _SKILL_EDIT_PREFIX_RE.match(tok)
+        if match:
+            name = match.group(1)
+            if name not in seen:
+                skills.append(Skill(name=name))
+                seen.add(name)
+    return skills
+
+
 def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:
     html = raw.get("html", "")
     subresources: dict[str, dict | None] = raw.get("subresources", {})
@@ -452,7 +482,7 @@ def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:
         about=None,  # not currently extracted — see README known limitations
         experience=parse_experience_from_flight(raw.get("experience_flight")),
         education=parse_education_from_flight(raw.get("education_flight")),
-        skills=[],  # endpoint retired by LinkedIn — see README known limitations
+        skills=parse_skills_from_flight(raw.get("skills_flight")),
         certifications=_parse_certifications(subresources.get("certifications")),
         languages=_parse_languages(subresources.get("languages")),
         profile_images=_image_urls_from_picture(mini_profile.get("picture") if mini_profile else None),

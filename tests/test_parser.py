@@ -5,11 +5,13 @@ from app.linkedin.parser import (
     parse_education_from_flight,
     parse_experience_from_flight,
     parse_profile,
+    parse_skills_from_flight,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_profile_response.json"
 EXPERIENCE_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "experience_flight_sample.txt"
 EDUCATION_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "education_flight_sample.txt"
+SKILLS_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "skills_flight_sample.txt"
 
 
 def load_fixture() -> dict:
@@ -81,17 +83,40 @@ def test_bonus_subtitle_drops_unresolved_urn_references():
     assert urn_project.subtitle is None
 
 
-def test_skills_always_empty():
-    profile = parse_profile(load_fixture(), public_identifier="janedoe")
-
-    assert profile.skills == []
-
-
-def test_experience_and_education_empty_without_flight_data():
+def test_experience_education_skills_empty_without_flight_data():
     profile = parse_profile(load_fixture(), public_identifier="janedoe")
 
     assert profile.experience == []
     assert profile.education == []
+    assert profile.skills == []
+
+
+def test_parses_skills_from_real_captured_flight_response():
+    # Real response captured live (see README) from the experimental SDUI
+    # "pagination" action — not synthetic. Covers one page (10) of skills;
+    # LinkedIn paginates further pages that aren't fetched — see README.
+    text = SKILLS_FLIGHT_FIXTURE.read_text()
+    skills = parse_skills_from_flight(text)
+
+    names = [s.name for s in skills]
+    assert names == [
+        "LangGraph",
+        "Voyage embeddings",
+        "PostgreSQL",
+        "Qdrant",
+        "Terraform",
+        "Docker",
+        "Amazon Simple Notification Service (SNS)",
+        "Amazon Web Services (AWS)",
+        "Go (Programming Language)",
+        "Distributed Systems",
+    ]
+
+
+def test_skills_parser_never_raises_on_garbage_input():
+    assert parse_skills_from_flight("not a real flight response") == []
+    assert parse_skills_from_flight("") == []
+    assert parse_skills_from_flight(None) == []
 
 
 def test_parses_education_from_real_captured_flight_response():
