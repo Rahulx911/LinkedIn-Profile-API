@@ -7,7 +7,11 @@ resolve chunk cross-references and walk the tree for visible text.
 
 Format: line-delimited `<id>:<payload>`, where payload is either a module
 import declaration (`I[...]`, not data) or a JSON value. Values can reference
-another chunk via a `"$<id>"` string.
+another chunk via a `"$<id>"` string. A `"$L<id>"` string is a *different*
+kind of reference (to a reusable client component definition, not plain
+data) — resolving those the same way as `$<id>` causes serious duplication,
+since the same component chunk gets referenced from many call sites with
+different (unmodeled, per-instance) props; left unresolved deliberately.
 """
 
 import json

@@ -546,6 +546,37 @@ def parse_skills_from_flight(raw_text: str | None) -> list[Skill]:
     return skills
 
 
+def parse_about_from_flight(raw_text: str | None) -> str | None:
+    """Experimental — see README. Same "component" action type and body as
+    experience (component id: profileCardsAboveActivity, which covers
+    Analytics/About/Services/Featured — not just About).
+
+    Deliberately does NOT look near the literal "About" heading token — it
+    turns out to be nowhere near the actual paragraph in the flattened text
+    stream (they only *appeared* adjacent in an earlier hand-inspection that
+    was looking at a deduplicated view). Instead scans the whole stream for a
+    long, prose-like string: distinctive enough in practice since Analytics/
+    Featured/Services in this same response are short labels or empty, not
+    prose, making the About paragraph the only match. Never raises."""
+    if not raw_text:
+        return None
+
+    try:
+        tokens = extract_text_stream(raw_text)
+    except Exception:
+        return None
+
+    for tok in tokens:
+        if (
+            len(tok) > 60
+            and " " in tok
+            and not _is_noise_token(tok)
+            and not tok.startswith(("http", "com.linkedin", "proto."))
+        ):
+            return tok
+    return None
+
+
 def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:
     html = raw.get("html", "")
     subresources: dict[str, dict | None] = raw.get("subresources", {})
@@ -557,7 +588,7 @@ def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:
         name=_extract_name_from_title(html),
         headline=mini_profile.get("occupation") if mini_profile else None,
         location=None,  # not currently extracted — see README known limitations
-        about=None,  # not currently extracted — see README known limitations
+        about=parse_about_from_flight(raw.get("about_flight")),
         experience=parse_experience_from_flight(raw.get("experience_flight")),
         education=parse_education_from_flight(raw.get("education_flight")),
         skills=parse_skills_from_flight(raw.get("skills_flight")),

@@ -80,6 +80,9 @@ SDUI_COMPONENT_IDS = {
     "experience": "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsExperienceOnly",
     "education": "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsEducationOnly",  # wrong (500); real mechanism is a different action type, see fetch_sdui_education_raw
     "skills": "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsSkillsOnly",  # unverified guess
+    # Confirmed live — the "above the activity feed" block, which includes
+    # the top card (name/headline/location) and About section.
+    "above_activity": "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsAboveActivity",
 }
 
 _SDUI_COMPONENT_BODY_TEMPLATE = (
@@ -363,6 +366,11 @@ class VoyagerClient:
             # never let it take down the rest of the response. See README.
             experience_flight = None
 
+        try:
+            about_flight = self.fetch_sdui_component_raw(public_identifier, "above_activity")
+        except Exception:
+            about_flight = None
+
         education_flight = None
         skills_flight = None
         profile_id = _extract_mini_profile_id(subresources)
@@ -382,4 +390,5 @@ class VoyagerClient:
             "experience_flight": experience_flight,
             "education_flight": education_flight,
             "skills_flight": skills_flight,
+            "about_flight": about_flight,
         }
