@@ -13,6 +13,9 @@ EXPERIENCE_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "experience_fli
 EXPERIENCE_FLIGHT_THIRDPARTY_FIXTURE = (
     Path(__file__).parent / "fixtures" / "experience_flight_thirdparty_sample.txt"
 )
+EXPERIENCE_FLIGHT_THIRDPARTY2_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "experience_flight_thirdparty2_sample.txt"
+)
 EDUCATION_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "education_flight_sample.txt"
 SKILLS_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "skills_flight_sample.txt"
 
@@ -224,6 +227,49 @@ def test_parses_experience_from_real_thirdparty_profile():
     assert role3.date_range.start == "May 2025"
     assert role3.date_range.end == "Dec 2025"
     assert role3.description is None
+
+
+def test_parses_experience_from_real_thirdparty_profile_with_attachments():
+    # Real response captured live from a third profile (see README) — this
+    # one has PDF attachment thumbnails and a "LinkedIn helped me get this
+    # job" promo banner mixed into the raw text stream, both of which must be
+    # filtered as noise rather than leaking into (or misattributed between)
+    # role descriptions. Matched by company rather than list position: the
+    # underlying data stream's order doesn't match the page's visual order
+    # (a known, documented limitation) even though each role's own fields are
+    # still correctly grouped together.
+    text = EXPERIENCE_FLIGHT_THIRDPARTY2_FIXTURE.read_text()
+    experiences = parse_experience_from_flight(text)
+    by_company = {e.company: e for e in experiences}
+
+    assert len(experiences) == 5
+
+    hyperspec = by_company["Hyperspec AI"]
+    assert hyperspec.title == "Robotics Developer Internship"
+    assert hyperspec.location == "San Francisco, California, United States · Remote"
+    assert hyperspec.date_range.start == "Oct 2023"
+    assert hyperspec.date_range.end is None
+    assert hyperspec.description is None  # promo banner filtered, not leaked
+
+    delhivery = by_company["Delhivery"]
+    assert delhivery.title == "Robotics Developer 1"
+    assert delhivery.date_range.start == "Dec 2025"
+    assert delhivery.description is None
+
+    miko = by_company["Miko"]
+    assert miko.title == "Robotics Engineer 1"
+    assert miko.date_range.start == "Jul 2024"
+    assert miko.date_range.end == "Dec 2025"
+    # Previously leaked Hyperspec's attachment filename here — must be gone.
+    assert miko.description is None
+
+    amazon = by_company["Amazon"]
+    assert amazon.title == "Amazon ML Summer School"
+    assert "2 week long mentorship program" in amazon.description
+
+    mercedes = by_company["Mercedes-Benz Research and Development India"]
+    assert mercedes.title == "Student Trainee Internship"
+    assert "Developed self-driving car software" in mercedes.description
 
 
 def test_experience_parser_never_raises_on_garbage_input():

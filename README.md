@@ -197,6 +197,21 @@ content populated — as this one had — means Education/Skills come back empty
 even though the profile visibly has both. Real limitation, now demonstrated
 rather than just documented.
 
+**A third profile surfaced two more noise sources, both now filtered:**
+LinkedIn's "you were referred by this job posting" promo banner
+(`"LinkedIn helped me get this job"`) and PDF attachment thumbnails
+(`"Thumbnail for X.pdf"` / a bare `X.pdf` filename) both appear inline in the
+text stream and aren't user-authored content — worse, an attachment's
+filename isn't reliably positioned next to the role it belongs to (one
+observed case had it attributed to the *following* role instead), so rather
+than guess at attribution, both are filtered out entirely. This same test
+also surfaced that **role order in the output doesn't always match the
+profile page's visual order** — one role appeared first in the underlying
+data stream despite being third on the page — even though each role's own
+fields (title/company/dates/location/description) are still correctly
+grouped together. Given clients would reasonably sort by date anyway, this
+wasn't treated as worth chasing further; see "Known limitations."
+
 ## Architecture
 
 ```
@@ -359,7 +374,13 @@ Liveness check for deployment platforms.
   available** (same opportunistic source as headline/photo — see below) to
   supply the profile's encoded id, which both their requests require. A
   profile with no content in `projects`/other bonus sections won't surface
-  this, in which case both come back empty even if the data exists.
+  this, in which case both come back empty even if the data exists —
+  confirmed live on two of the three profiles tested during development.
+- **Experience entries aren't guaranteed to be in page-display order.**
+  Confirmed live on a third-party profile where one role appeared first in
+  the parsed output despite being third on the actual page. Each role's own
+  fields are still correctly grouped together — only the ordering between
+  roles can differ from what's visually shown.
 - **`about` and `location` are not currently extracted.** They may be
   server-rendered into the page HTML like the name is, but that wasn't
   confirmed, so rather than guess at fragile selectors, these fields are
