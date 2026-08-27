@@ -1,16 +1,16 @@
 """
-Run this locally, with your own LI_AT_COOKIE set in .env, to see the real shape
-of LinkedIn's response and tune app/linkedin/parser.py against it.
+Runs the full extraction pipeline (VoyagerClient.fetch_all_raw + parse_profile)
+against a real profile and prints the final parsed result, so you can sanity
+check it end-to-end.
 
     python scripts/inspect_raw.py <public_identifier>
     (e.g. python scripts/inspect_raw.py rahul911)
 
-It prints every distinct `$type` found in the response's `included` array, and
-saves the full raw JSON to debug_output/<public_identifier>.raw.json (gitignored)
-so you can open it and check real field names.
+Saves the raw bundle (HTML + subresource JSON) to
+debug_output/<public_identifier>.raw.json (gitignored).
 
 This is deliberately a manual, human-run script rather than something an
-automated agent invokes — it's making a real authenticated call to LinkedIn
+automated agent invokes — it's making real authenticated calls to LinkedIn
 with your session cookie, and that's a step only you should trigger.
 """
 
@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import get_settings  # noqa: E402
 from app.linkedin.client import VoyagerClient  # noqa: E402
+from app.linkedin.parser import parse_profile  # noqa: E402
 
 
 def main() -> None:
@@ -38,32 +39,24 @@ def main() -> None:
     )
 
     try:
-        raw = client.get_profile_raw(public_identifier)
+        raw = client.fetch_all_raw(public_identifier)
     finally:
         client.close()
 
-    print(f"Top-level response keys: {sorted(raw.keys())}\n")
+    print("Subresource availability:")
+    for resource, value in raw["subresources"].items():
+        count = len(value.get("included", [])) if value else 0
+        print(f"  {resource:24s} {'available' if value else 'unavailable (404/410)':24s} ({count} entities)")
 
-    included = raw.get("included", [])
-    if included:
-        types = sorted({str(item.get("$type", "<missing>")) for item in included})
-        print(f"{len(included)} entities in `included`. Distinct $type values:\n")
-        for t in types:
-            print(f"  - {t}")
-    else:
-        print(
-            "No `included` array in the response — this looks like the legacy "
-            "profileView shape, which nests data directly (e.g. raw['positions'], "
-            "raw['educations']) instead of a flat normalized list. Check "
-            "debug_output/*.raw.json to see the actual structure and adjust "
-            "app/linkedin/parser.py accordingly."
-        )
+    profile = parse_profile(raw, public_identifier)
+    print("\nParsed profile:")
+    print(profile.model_dump_json(indent=2))
 
     out_dir = Path(__file__).resolve().parent.parent / "debug_output"
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / f"{public_identifier}.raw.json"
     out_path.write_text(json.dumps(raw, indent=2))
-    print(f"\nFull raw response saved to {out_path} (gitignored, do not commit).")
+    print(f"\nFull raw bundle saved to {out_path} (gitignored, do not commit).")
 
 
 if __name__ == "__main__":

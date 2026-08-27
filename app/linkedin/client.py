@@ -2,33 +2,28 @@
 Direct-HTTP LinkedIn Voyager client. No browser at runtime — every call here is
 a plain HTTP request built to look like the ones LinkedIn's own web app makes.
 
-get_profile_raw() tries two paths, in order (see README "How this was reverse
-engineered" for the full writeup and what's confirmed vs. not):
+See README "How this was reverse engineered" for the full investigation. Short
+version, confirmed live against a real account:
 
-1. fetch_profile_legacy_raw() — an older Voyager REST endpoint that takes the
-   public identifier directly:
-
-       GET /voyager/api/identity/profiles/{public_identifier}/profileView
-
-   This is the primary path. It sidesteps a real problem with the modern path
-   below: the GraphQL query wants LinkedIn's opaque encoded profile ID (the
-   "ACoAA..." form), which for the *logged-in user's own profile* is available
-   client-side, but for anyone else's profile is only obtainable via extra
-   JS-driven bootstrap calls a real browser makes after page load — which we
-   deliberately aren't replicating, since that would mean running a browser.
-
-2. resolve_urn() + fetch_profile_raw() — the modern path, used only if the
-   legacy endpoint is gone. resolve_urn() fetches the public profile page HTML
-   while authenticated and regexes the member URN out of it; fetch_profile_raw()
-   then calls the exact persisted GraphQL query LinkedIn's own frontend fires
-   on page load, captured directly from a live Network-tab session:
-
-       GET /voyager/api/graphql
-           ?variables=(memberIdentity:<urn>)
-           &queryId=voyagerIdentityDashProfiles.b5c27c04968c409fc0ed3546575b9b7a
-
-   As currently implemented this path only reliably works for the logged-in
-   account's own profile, for the reason above — see README known limitations.
+- The old combined endpoint (`/voyager/api/identity/profiles/{id}/profileView`)
+  and the per-section endpoints for the three highest-value fields —
+  `/positions`, `/educations`, `/skills` — all return `410 Gone` for every
+  request, regardless of profile. LinkedIn has deliberately retired exactly
+  the "core resume" data, while leaving secondary sections alive.
+- `/certifications` and `/languages` (both required by the assignment) still
+  work, plus several sections beyond what was asked: `/projects`, `/honors`,
+  `/publications`, `/courses`, `/testScores`, `/patents`, `/organizations`,
+  `/volunteerExperiences`. All take the public identifier directly — no URN
+  resolution needed.
+- The profile's name is read from the page's `<title>` tag (stable: LinkedIn
+  always renders it as "{Name} | LinkedIn"). Headline/photo are recovered
+  opportunistically from a `MiniProfile` entity that LinkedIn embeds as a
+  side-effect in some subresource responses (e.g. `projects`, when a project
+  has the profile owner as a contributor) — see parser.py.
+- A separate GraphQL query (`voyagerIdentityDashProfiles`) and the modern
+  page's embedded "lazy anchor" placeholders for Experience/Education both
+  point at a further SDUI-style resolution mechanism for those three fields
+  that wasn't fully cracked — see README known limitations.
 """
 
 import re
@@ -42,7 +37,21 @@ from app.linkedin.exceptions import (
     RateLimitedError,
 )
 
-PROFILE_GRAPHQL_QUERY_ID = "voyagerIdentityDashProfiles.b5c27c04968c409fc0ed3546575b9b7a"
+# Confirmed alive via live probing (see scripts/probe_endpoints.py). Two of
+# these (certifications, languages) are required by the assignment; the rest
+# are bonus sections LinkedIn didn't lock down.
+SUBRESOURCES = [
+    "certifications",
+    "languages",
+    "projects",
+    "honors",
+    "publications",
+    "courses",
+    "testScores",
+    "patents",
+    "organizations",
+    "volunteerExperiences",
+]
 
 # Matches the member URN LinkedIn embeds in the server-rendered hydration JSON
 # on a profile page. Confirmed live: modern profile pages embed
@@ -110,63 +119,54 @@ class VoyagerClient:
                 f"LinkedIn denied access to '{public_identifier}' (403) — "
                 "private profile, out of network, or the account is restricted."
             )
-        if response.status_code == 404:
-            raise ProfileNotFoundError(f"Profile '{public_identifier}' not found (404).")
+        if response.status_code in (404, 410):
+            raise ProfileNotFoundError(
+                f"Profile '{public_identifier}' not found, or endpoint retired "
+                f"({response.status_code})."
+            )
         if response.status_code == 429:
             raise RateLimitedError("LinkedIn is rate-limiting this account (429).")
-        # LinkedIn sometimes answers with 200 + a login/checkpoint HTML page
-        # instead of a real error status when the cookie is stale.
-        if "text/html" in response.headers.get("content-type", "") and "graphql" not in str(response.url):
-            pass  # expected for resolve_urn(), which deliberately fetches HTML
         response.raise_for_status()
 
-    def resolve_urn(self, public_identifier: str) -> str:
+    def fetch_profile_html(self, public_identifier: str) -> str:
         response = self._client.get(f"/in/{public_identifier}/")
-        if response.status_code == 404:
-            raise ProfileNotFoundError(f"Profile '{public_identifier}' not found (404).")
-        if response.status_code in (401, 403):
+        if response.status_code in (401, 403, 404):
             self._check_auth_response(response, public_identifier)
+        if "authwall" in str(response.url) or "/login" in str(response.url):
+            raise AuthenticationError(
+                "LinkedIn redirected to a login/authwall page — the li_at "
+                "cookie is missing, expired, or the account hit a checkpoint."
+            )
+        response.raise_for_status()
+        return response.text
 
-        match = URN_PATTERN.search(response.text)
+    def resolve_urn(self, public_identifier: str) -> str:
+        """Not used in the main extraction flow (see module docstring) — kept
+        for the GraphQL path, which currently only works for the logged-in
+        account's own profile."""
+        html = self.fetch_profile_html(public_identifier)
+        match = URN_PATTERN.search(html)
         if not match:
-            if "authwall" in str(response.url) or "/login" in str(response.url):
-                raise AuthenticationError(
-                    "LinkedIn redirected to a login/authwall page — the li_at "
-                    "cookie is missing, expired, or the account hit a checkpoint."
-                )
             raise ProfileNotFoundError(
-                f"Could not find a member URN in the page for '{public_identifier}'. "
-                "Run scripts/inspect_raw.py to see the raw response and adjust "
-                "URN_PATTERN if LinkedIn changed its markup."
+                f"Could not find a member URN in the page for '{public_identifier}'."
             )
         return match.group(1)
 
-    def fetch_profile_raw(self, urn: str, public_identifier: str) -> dict:
-        url = (
-            "/voyager/api/graphql"
-            f"?includeWebMetadata=true&variables=(memberIdentity:{urn})"
-            f"&queryId={PROFILE_GRAPHQL_QUERY_ID}"
-        )
-        response = self._client.get(url)
+    def fetch_subresource_raw(self, public_identifier: str, resource: str) -> dict | None:
+        """Returns None if this specific subresource is unavailable (404/410)
+        — that's expected for some sections on some profiles, and for
+        positions/educations/skills on every profile (see module docstring).
+        Real errors (401/403/429) still raise."""
+        response = self._client.get(f"/voyager/api/identity/profiles/{public_identifier}/{resource}")
+        if response.status_code in (404, 410):
+            return None
         self._check_auth_response(response, public_identifier)
         return response.json()
 
-    def fetch_profile_legacy_raw(self, public_identifier: str) -> dict:
-        """Older Voyager REST endpoint that takes the public identifier
-        directly — no URN resolution needed. LinkedIn appears to keep this
-        alive for backward compatibility (older official/mobile clients).
-        Used as the primary path here because it sidesteps the problem that
-        the GraphQL query's `memberIdentity` wants an opaque encoded profile
-        ID that isn't obtainable from a plain (non-JS-executing) HTML fetch
-        for anyone other than the logged-in account itself."""
-        response = self._client.get(f"/voyager/api/identity/profiles/{public_identifier}/profileView")
-        self._check_auth_response(response, public_identifier)
-        return response.json()
-
-    def get_profile_raw(self, public_identifier: str) -> dict:
-        try:
-            return self.fetch_profile_legacy_raw(public_identifier)
-        except ProfileNotFoundError:
-            pass  # legacy endpoint may be gone/renamed; fall through to the GraphQL path
-        urn = self.resolve_urn(public_identifier)
-        return self.fetch_profile_raw(urn, public_identifier)
+    def fetch_all_raw(self, public_identifier: str) -> dict:
+        html = self.fetch_profile_html(public_identifier)
+        subresources = {
+            resource: self.fetch_subresource_raw(public_identifier, resource)
+            for resource in SUBRESOURCES
+        }
+        return {"html": html, "subresources": subresources}

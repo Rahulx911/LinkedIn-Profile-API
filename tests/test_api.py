@@ -22,7 +22,7 @@ class FakeVoyagerClient:
         self._raw = raw
         self._raise_error = raise_error
 
-    def get_profile_raw(self, public_identifier: str) -> dict:
+    def fetch_all_raw(self, public_identifier: str) -> dict:
         if self._raise_error:
             raise self._raise_error
         return self._raw

@@ -45,6 +45,14 @@ class ProfileImage(BaseModel):
     height: int | None = None
 
 
+class BonusItem(BaseModel):
+    title: str | None = None
+    subtitle: str | None = None
+    description: str | None = None
+    date_range: DateRange | None = None
+    url: str | None = None
+
+
 class ProfileResponse(BaseModel):
     public_identifier: str
     name: str | None = None
@@ -57,6 +65,10 @@ class ProfileResponse(BaseModel):
     certifications: list[Certification] = []
     languages: list[Language] = []
     profile_images: list[ProfileImage] = []
+    # Sections beyond what the assignment asked for, surfaced because the
+    # underlying LinkedIn endpoints for them are still live — see README.
+    # Keyed by section name (e.g. "projects", "honors"); empty if none found.
+    bonus_sections: dict[str, list[BonusItem]] = {}
 
 
 class ProfileRequest(BaseModel):

@@ -75,7 +75,7 @@ def get_profile(request: ProfileRequest):
 
     client = get_client()
     try:
-        raw = client.get_profile_raw(public_identifier)
+        raw = client.fetch_all_raw(public_identifier)
     finally:
         client.close()
 
