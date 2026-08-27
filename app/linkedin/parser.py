@@ -179,7 +179,22 @@ def _parse_bonus_section(raw: dict | None, resource: str) -> list[BonusItem]:
 _DATE_RANGE_RE = re.compile(
     r"^([A-Z][a-z]{2} \d{4}|\d{4}) - (Present|[A-Z][a-z]{2} \d{4}|\d{4})(?:\s*·\s*.+)?$"
 )
-_LOCATION_RE = re.compile(r"^.+ · (On-site|Remote|Hybrid)$")
+# A role active less than a month shows as a single date, no range, e.g.
+# "Aug 2026 · 1 mo" — confirmed live on a just-started role.
+_DATE_SINGLE_RE = re.compile(r"^([A-Z][a-z]{2} \d{4}) · .+$")
+_LOCATION_SUFFIX_RE = re.compile(r"^(?:.+ · )?(On-site|Remote|Hybrid)$")
+# Bare "City, State, Country" with no workplace-type suffix at all — a third
+# location format confirmed live (a role with no listed workplace type).
+# Requires each comma-separated part to start capitalized, which real
+# description sentences (lowercase words after the first) don't tend to do.
+_LOCATION_ADDRESS_RE = re.compile(r"^[A-Z][A-Za-z .'-]+(, [A-Z][A-Za-z .'-]+){1,3}$")
+
+
+def _is_location_token(token: str) -> bool:
+    return bool(_LOCATION_SUFFIX_RE.match(token) or _LOCATION_ADDRESS_RE.match(token))
+
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _EMPLOYMENT_TYPES = {
     "Full-time", "Part-time", "Internship", "Contract", "Freelance",
     "Self-employed", "Trainee", "Apprenticeship", "Seasonal",
@@ -245,12 +260,24 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
     "<location> · On-site/Remote/Hybrid" lines, "<company> · <employment
     type>" lines — and groups text around them.
 
-    Known weak points: title comes from a different part of the component
-    tree than dates/location/description (matched positionally by order,
-    which can misalign for unusual profile layouts), and description
-    extraction is a token-noise heuristic, not a real field. Never raises —
-    returns whatever it could parse, empty list on total failure, since this
-    is explicitly best-effort on top of an unofficial internal protocol.
+    Known weak points: title comes from one of two different mechanisms
+    depending on whether the viewer owns the profile (see below), and
+    description extraction is a token-noise heuristic, not a real field.
+    Never raises — returns whatever it could parse, empty list on total
+    failure, since this is explicitly best-effort on top of an unofficial
+    internal protocol.
+
+    Title extraction, two cases:
+    - Viewing your own profile: LinkedIn renders an "edit" affordance next to
+      each position, and the title sits next to that edit landmark
+      (`ProfilePositionEditForm`) rather than inline in the visible card text.
+    - Viewing someone else's profile: there's no edit affordance (you can't
+      edit their profile), so the title renders directly inline, immediately
+      before its employment type — confirmed live on a third-party profile,
+      which is also where a same-day/short-tenure role surfaces a date format
+      with no range at all ("Aug 2026 · 1 mo", handled by _DATE_SINGLE_RE).
+    Both sources are collected; the inline one takes priority per-role since
+    it's unambiguous, falling back to the edit-landmark list by position.
     """
     if not raw_text:
         return []
@@ -260,11 +287,12 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
     except Exception:
         return []
 
-    # Each position id appears twice in the stream: once next to its real
-    # title (near a "ProfilePositionEditForm" marker), once again later next
-    # to an unrelated "<Title> at <Company>" screen title (for the "skill
-    # associations" overlay). Only the first occurrence per id is a title.
-    titles: list[str] = []
+    # Self-view only: each position id appears twice in the stream — once
+    # next to its real title (near a "ProfilePositionEditForm" marker), once
+    # again later next to an unrelated "<Title> at <Company>" screen title
+    # (for the "skill associations" overlay). Only the first occurrence per
+    # id is a title.
+    edit_landmark_titles: list[str] = []
     seen_position_ids: set[str] = set()
     for i, tok in enumerate(tokens):
         if _POSITION_ID_RE.match(tok) and tok not in seen_position_ids:
@@ -274,7 +302,7 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
                 ):
                     break
                 if not _is_noise_token(tokens[j]):
-                    titles.append(tokens[j])
+                    edit_landmark_titles.append(tokens[j])
                     seen_position_ids.add(tok)
                     break
 
@@ -282,6 +310,8 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
     current_company: str | None = None
     current_type: str | None = None
     current_location: str | None = None
+    pending_title: str | None = None
+    edit_landmark_idx = 0
     i, n = 0, len(tokens)
     while i < n:
         tok = tokens[i]
@@ -297,13 +327,14 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
             current_type = tok
             i += 1
             continue
-        if _LOCATION_RE.match(tok):
+        if _is_location_token(tok):
             current_location = tok
             i += 1
             continue
-        date_match = _DATE_RANGE_RE.match(tok)
+        date_match = _DATE_RANGE_RE.match(tok) or _DATE_SINGLE_RE.match(tok)
         if date_match:
-            start, end = date_match.group(1), date_match.group(2)
+            start = date_match.group(1)
+            end = date_match.group(2) if date_match.re is _DATE_RANGE_RE else "Present"
             j = i + 1
             # A location shortly after this date range (skipping intervening
             # noise tokens — CSS var refs, single-letter tag markers) belongs
@@ -313,10 +344,15 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
             peek = j
             while peek < n and _is_noise_token(tokens[peek]) and peek - j < 12:
                 peek += 1
-            if peek < n and _LOCATION_RE.match(tokens[peek]):
+            if peek < n and _is_location_token(tokens[peek]):
                 current_location = tokens[peek]
                 j = peek + 1
             location = current_location
+            title = pending_title
+            if title is None and edit_landmark_idx < len(edit_landmark_titles):
+                title = edit_landmark_titles[edit_landmark_idx]
+            edit_landmark_idx += 1
+            pending_title = None
             desc_parts = []
             while j < n:
                 nxt = tokens[j]
@@ -324,20 +360,37 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
                     _COMPANY_TYPE_RE.match(nxt)
                     or nxt in _EMPLOYMENT_TYPES
                     or _DATE_RANGE_RE.match(nxt)
+                    or _DATE_SINGLE_RE.match(nxt)
                     or nxt.startswith(("com.linkedin.sdui", "proto.sdui", "Show all"))
+                    or nxt.endswith(" logo")
+                    or _UUID_RE.match(nxt)
+                    or "media.licdn.com" in nxt
+                    or nxt == "WIDTH_AND_HEIGHT"
                 ):
                     break
-                if nxt in titles:
+                if nxt in edit_landmark_titles:
                     # A card's title heading occasionally renders structurally
                     # near an adjacent role's content — skip it rather than
                     # treat it as this role's description or stop collecting.
                     j += 1
                     continue
-                if not _is_noise_token(nxt) and not _LOCATION_RE.match(nxt):
+                # An upcoming bare inline title for the *next* role (it can
+                # precede either a bare employment type or a combined
+                # "Company · Type" line, depending on layout) — stop here
+                # without consuming it, so the outer loop picks it up.
+                nxt_next = _find_next_meaningful(tokens, j + 1)
+                if (
+                    not _is_noise_token(nxt)
+                    and nxt_next is not None
+                    and (nxt_next in _EMPLOYMENT_TYPES or _COMPANY_TYPE_RE.match(nxt_next))
+                ):
+                    break
+                if not _is_noise_token(nxt) and not _is_location_token(nxt):
                     desc_parts.append(nxt)
                 j += 1
             roles.append(
                 {
+                    "title": title,
                     "company": current_company,
                     "start": start,
                     "end": None if end == "Present" else end,
@@ -347,39 +400,51 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
             )
             i = j
             continue
-        # Bare company name (no " · <type>" suffix on the same line) — only
-        # when the next token confirms it's a company header, not stray text.
+        # Bare company name (no " · <type>" suffix on the same line) —
+        # specifically one immediately followed by a duration badge ("8 mos"),
+        # which only ever appears right after a company name, never after a
+        # title. This narrower confirmation (vs. also accepting employment
+        # type/location/date as confirmation) is what avoids misreading an
+        # inline title — e.g. on a third-party profile, "Computer vision
+        # intern" followed by "Internship" — as a company name.
         next_meaningful = _find_next_meaningful(tokens, i + 1)
         if (
             not _is_noise_token(tok)
-            and tok not in titles
+            and tok not in edit_landmark_titles
             and next_meaningful is not None
-            and (
-                _DURATION_ONLY_RE.match(next_meaningful)
-                or next_meaningful in _EMPLOYMENT_TYPES
-                or _LOCATION_RE.match(next_meaningful)
-                or _DATE_RANGE_RE.match(next_meaningful)
-            )
+            and _DURATION_ONLY_RE.match(next_meaningful)
         ):
             current_company = tok
             current_type = None
             current_location = None
+            pending_title = None
+            i += 1
+            continue
+        # Bare inline title (third-party-profile layout) — a standalone token
+        # immediately followed by either a bare employment type or a combined
+        # "Company · Type" line (single-role companies show title *before*
+        # that combined line), once it's clear this isn't a company name.
+        if (
+            not _is_noise_token(tok)
+            and tok not in edit_landmark_titles
+            and next_meaningful is not None
+            and (next_meaningful in _EMPLOYMENT_TYPES or _COMPANY_TYPE_RE.match(next_meaningful))
+        ):
+            pending_title = tok
             i += 1
             continue
         i += 1
 
-    experiences = []
-    for idx, role in enumerate(roles):
-        experiences.append(
-            Experience(
-                title=titles[idx] if idx < len(titles) else None,
-                company=role["company"],
-                location=role["location"],
-                date_range=DateRange(start=role["start"], end=role["end"]),
-                description=role["description"],
-            )
+    return [
+        Experience(
+            title=role["title"],
+            company=role["company"],
+            location=role["location"],
+            date_range=DateRange(start=role["start"], end=role["end"]),
+            description=role["description"],
         )
-    return experiences
+        for role in roles
+    ]
 
 
 _EDU_EDIT_PREFIX_RE = re.compile(r"^Edit education (.+)$")
