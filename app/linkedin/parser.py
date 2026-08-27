@@ -18,10 +18,13 @@ What's built from confirmed-real data (captured live, see README):
   names are mapped generically (title/name, a subtitle-ish field, description,
   dates, url) since exact per-type shapes weren't all individually verified.
 
-What's NOT available: experience, education, skills. LinkedIn has retired the
-endpoints for exactly these three (confirmed 410 Gone on every profile) — see
-README "Known limitations". They're always returned as empty lists rather
-than guessed at.
+- experience, education: reverse engineered via LinkedIn's internal SDUI/React
+  Server Components protocol (see README "How this was reverse engineered").
+  Experimental — heuristic parsers on top of an undocumented wire format.
+
+What's NOT available: skills. LinkedIn retired its REST endpoint (confirmed
+410 Gone) and the SDUI componentId for it wasn't found in the time available
+— see README "Known limitations". Always returned as an empty list.
 """
 
 import re
@@ -32,6 +35,7 @@ from app.models import (
     BonusItem,
     Certification,
     DateRange,
+    Education,
     Experience,
     Language,
     ProfileImage,
@@ -224,6 +228,13 @@ def _find_next_meaningful(tokens: list[str], start: int, limit: int = 12) -> str
     return None
 
 
+def _find_prev_meaningful(tokens: list[str], start: int, limit: int = 12) -> str | None:
+    for k in range(start, max(start - limit, -1), -1):
+        if not _is_noise_token(tokens[k]):
+            return tokens[k]
+    return None
+
+
 def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
     """Experimental — see README "How this was reverse engineered" and
     "Known limitations". Heuristically reconstructs Experience entries from
@@ -370,6 +381,63 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
     return experiences
 
 
+_EDU_EDIT_PREFIX_RE = re.compile(r"^Edit education (.+)$")
+_EDU_DATE_RANGE_RE = re.compile(r"^([A-Za-z]{3} \d{4}) [–-] (Present|[A-Za-z]{3} \d{4})$")
+
+
+def parse_education_from_flight(raw_text: str | None) -> list[Education]:
+    """Experimental — see README "How this was reverse engineered" and
+    "Known limitations". Heuristically reconstructs Education entries from
+    LinkedIn's SDUI "Flight" wire format response — same underlying protocol
+    as parse_experience_from_flight(), but a much simpler layout: school name
+    (reliably sourced from "Edit education <School>" text, the same kind of
+    edit-form landmark used for experience titles), then a degree/field line,
+    then a date range using an en dash ("–"), immediately adjacent — no
+    location/description clutter to work around. Never raises.
+    """
+    if not raw_text:
+        return []
+
+    try:
+        tokens = extract_text_stream(raw_text)
+    except Exception:
+        return []
+
+    schools: list[str] = []
+    for tok in tokens:
+        match = _EDU_EDIT_PREFIX_RE.match(tok)
+        if match:
+            schools.append(match.group(1))
+
+    entries: list[dict] = []
+    for i, tok in enumerate(tokens):
+        date_match = _EDU_DATE_RANGE_RE.match(tok)
+        if not date_match:
+            continue
+        prev = _find_prev_meaningful(tokens, i - 1)
+        degree = prev if prev is not None and not _EDU_DATE_RANGE_RE.match(prev) else None
+        entries.append(
+            {
+                "degree": degree,
+                "start": date_match.group(1),
+                "end": None if date_match.group(2) == "Present" else date_match.group(2),
+            }
+        )
+
+    education = []
+    for idx, entry in enumerate(entries):
+        education.append(
+            Education(
+                school=schools[idx] if idx < len(schools) else None,
+                degree=entry["degree"],
+                field_of_study=None,
+                date_range=DateRange(start=entry["start"], end=entry["end"]),
+                description=None,
+            )
+        )
+    return education
+
+
 def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:
     html = raw.get("html", "")
     subresources: dict[str, dict | None] = raw.get("subresources", {})
@@ -383,7 +451,7 @@ def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:
         location=None,  # not currently extracted — see README known limitations
         about=None,  # not currently extracted — see README known limitations
         experience=parse_experience_from_flight(raw.get("experience_flight")),
-        education=[],  # endpoint retired by LinkedIn — see README known limitations
+        education=parse_education_from_flight(raw.get("education_flight")),
         skills=[],  # endpoint retired by LinkedIn — see README known limitations
         certifications=_parse_certifications(subresources.get("certifications")),
         languages=_parse_languages(subresources.get("languages")),

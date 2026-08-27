@@ -1,10 +1,15 @@
 import json
 from pathlib import Path
 
-from app.linkedin.parser import parse_experience_from_flight, parse_profile
+from app.linkedin.parser import (
+    parse_education_from_flight,
+    parse_experience_from_flight,
+    parse_profile,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_profile_response.json"
 EXPERIENCE_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "experience_flight_sample.txt"
+EDUCATION_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "education_flight_sample.txt"
 
 
 def load_fixture() -> dict:
@@ -76,17 +81,49 @@ def test_bonus_subtitle_drops_unresolved_urn_references():
     assert urn_project.subtitle is None
 
 
-def test_education_and_skills_always_empty():
+def test_skills_always_empty():
     profile = parse_profile(load_fixture(), public_identifier="janedoe")
 
-    assert profile.education == []
     assert profile.skills == []
 
 
-def test_experience_empty_without_flight_data():
+def test_experience_and_education_empty_without_flight_data():
     profile = parse_profile(load_fixture(), public_identifier="janedoe")
 
     assert profile.experience == []
+    assert profile.education == []
+
+
+def test_parses_education_from_real_captured_flight_response():
+    # Real response captured live (see README) from the experimental SDUI
+    # "pagination" action — not synthetic, unlike the other fixtures.
+    text = EDUCATION_FLIGHT_FIXTURE.read_text()
+    education = parse_education_from_flight(text)
+
+    assert len(education) == 3
+
+    uni, junior_college, school = education
+
+    assert uni.school == "Vellore Institute of Technology"
+    assert uni.degree == "Bachelor of Technology - BTech, Computer Science"
+    assert uni.date_range.start == "Jul 2021"
+    assert uni.date_range.end == "Sep 2025"
+
+    assert junior_college.school == "Shri Pramod Patil Junior college"
+    assert junior_college.degree == "12 complete, science"
+    assert junior_college.date_range.start == "Jul 2019"
+    assert junior_college.date_range.end == "Jan 2021"
+
+    assert school.school == "Wisdom High International School - India"
+    assert school.degree == "10th, Isce"
+    assert school.date_range.start == "Jul 2007"
+    assert school.date_range.end == "Mar 2019"
+
+
+def test_education_parser_never_raises_on_garbage_input():
+    assert parse_education_from_flight("not a real flight response") == []
+    assert parse_education_from_flight("") == []
+    assert parse_education_from_flight(None) == []
 
 
 def test_parses_experience_from_real_captured_flight_response():

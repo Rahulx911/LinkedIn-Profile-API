@@ -20,10 +20,15 @@ version, confirmed live against a real account:
   opportunistically from a `MiniProfile` entity that LinkedIn embeds as a
   side-effect in some subresource responses (e.g. `projects`, when a project
   has the profile owner as a contributor) — see parser.py.
-- A separate GraphQL query (`voyagerIdentityDashProfiles`) and the modern
-  page's embedded "lazy anchor" placeholders for Experience/Education both
-  point at a further SDUI-style resolution mechanism for those three fields
-  that wasn't fully cracked — see README known limitations.
+- Experience and Education are recovered via LinkedIn's internal SDUI/React
+  Server Components protocol — two *different* action types under
+  `/flagship-web/rsc-action/actions/`: `component` for Experience (static
+  componentId, vanity name only), `pagination` for Education (needs the
+  profile's opaque encoded id, sourced from the same MiniProfile above). Both
+  return React "Flight" wire format, decoded by app/linkedin/flight.py and
+  heuristically structured by parser.py. Experimental — see README.
+- Skills remains unsolved: its REST endpoint is `410 Gone`, and the SDUI
+  componentId/pagerId for it wasn't found in the time available.
 """
 
 import base64
@@ -64,15 +69,16 @@ SUBRESOURCES = [
 # one uses no random per-session UUID, which is what makes it replicable
 # outside a live browser.
 #
-# "education" and "skills" below are guesses following the same naming
-# convention as "experience" — NOT confirmed. "education" was tested live and
-# returns 500 (wrong componentId, not a real access/validation error), so the
-# real id for it uses some other naming scheme that wasn't found in the time
-# available. Kept here, unused by fetch_all_raw, as a documented starting
-# point for extending this further — see README known limitations.
+# The "education" and "skills" componentIds below were guesses following the
+# same naming convention as "experience", for this SAME "component" action —
+# both wrong. Education's real mechanism turned out to be a completely
+# different action type (`pagination`, see fetch_sdui_education_raw and its
+# _SDUI_EDUCATION_PAGINATION_BODY_TEMPLATE below) rather than a differently-
+# named componentId here. Skills' real mechanism remains unfound. Kept here
+# as a documented dead end — see README known limitations.
 SDUI_COMPONENT_IDS = {
     "experience": "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsExperienceOnly",
-    "education": "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsEducationOnly",  # confirmed wrong (500)
+    "education": "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsEducationOnly",  # wrong (500); real mechanism is a different action type, see fetch_sdui_education_raw
     "skills": "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsSkillsOnly",  # unverified guess
 }
 
@@ -111,6 +117,23 @@ _SDUI_COMPONENT_BODY_TEMPLATE = (
     '"screenId":"com.linkedin.sdui.flagshipnav.profile.Profile","knownTemplateIds":[]}}}}'
 )
 
+_SDUI_EDUCATION_PAGINATION_BODY_TEMPLATE = (
+    '{{"pagerId":"com.linkedin.sdui.pagers.profile.details.education",'
+    '"clientArguments":{{"$type":"proto.sdui.actions.requests.RequestedArguments","requestedStateKeys":[],'
+    '"payload":{{"vanityName":"{v}","profileId":"{p}","start":0,"count":10,'
+    '"detailSectionReplaceableComponentRef":"com.linkedin.sdui.profile.card.ref{p}EducationDetailsSection"}},'
+    '"requestMetadata":{{"$type":"proto.sdui.common.RequestMetadata"}},"states":[],'
+    '"screenId":"com.linkedin.sdui.flagshipnav.profile.ProfileEducationDetails","knownTemplateIds":[]}},'
+    '"paginationRequest":{{"$type":"proto.sdui.actions.requests.PaginationRequest",'
+    '"pagerId":"com.linkedin.sdui.pagers.profile.details.education",'
+    '"trigger":{{"$case":"itemDistanceTrigger","itemDistanceTrigger":'
+    '{{"$type":"proto.sdui.actions.requests.ItemDistanceTrigger","preloadDistance":3,"preloadLength":250}}}},'
+    '"retryCount":2,"requestedArguments":{{"$type":"proto.sdui.actions.requests.RequestedArguments",'
+    '"requestedStateKeys":[],"payload":{{"vanityName":"{v}","profileId":"{p}","start":0,"count":10,'
+    '"detailSectionReplaceableComponentRef":"com.linkedin.sdui.profile.card.ref{p}EducationDetailsSection"}},'
+    '"requestMetadata":{{"$type":"proto.sdui.common.RequestMetadata"}}}}}}}}'
+)
+
 # Matches the member URN LinkedIn embeds in the server-rendered hydration JSON
 # on a profile page. Confirmed live: modern profile pages embed
 # "urn:li:member:<id>" (not "urn:li:fsd_profile:..." as older writeups
@@ -137,6 +160,23 @@ BASE_HEADERS = {
     ),
     "Referer": "https://www.linkedin.com/feed/",
 }
+
+
+def _extract_mini_profile_id(subresources: dict) -> str | None:
+    """Finds the profile's opaque encoded id (the "ACoAA..." form) from a
+    MiniProfile entity opportunistically present in some subresource
+    responses (same source parser.py uses for headline/photo). Needed as
+    input to fetch_sdui_education_raw(), which — unlike the experience
+    component action — requires this id, not just the vanity name."""
+    for raw in subresources.values():
+        if not raw or not isinstance(raw.get("included"), list):
+            continue
+        for entity in raw["included"]:
+            if "miniprofile" in str(entity.get("$type", "")).lower():
+                urn = entity.get("entityUrn", "")
+                if ":" in urn:
+                    return urn.rsplit(":", 1)[-1]
+    return None
 
 
 class VoyagerClient:
@@ -245,6 +285,32 @@ class VoyagerClient:
         self._check_auth_response(response, public_identifier)
         return response.text
 
+    def fetch_sdui_education_raw(self, public_identifier: str, profile_id: str) -> str:
+        """Experimental — see module docstring and README. Education lives
+        behind a third, distinct SDUI action type from the "component" one
+        used for experience: /actions/pagination, captured live from the
+        `/in/{id}/details/education/` full-page view. Unlike the component
+        action, this one requires the profile's opaque encoded id (not just
+        the vanity name) — sourced from the MiniProfile entity opportunistically
+        recovered elsewhere (see parser.py's _find_mini_profile / headline).
+        Returns raw Flight-format text, same as fetch_sdui_component_raw."""
+        span_id = base64.b64encode(os.urandom(8)).decode()
+        url = (
+            "/flagship-web/rsc-action/actions/pagination"
+            f"?sduiid=com.linkedin.sdui.pagers.profile.details.education&parentSpanId={span_id}"
+        )
+        headers = {
+            "content-type": "application/json",
+            "x-li-rsc-stream": "true",
+            "x-li-anchor-page-key": "d_flagship3_profile_view_base_education_details",
+            "origin": "https://www.linkedin.com",
+            "referer": f"https://www.linkedin.com/in/{public_identifier}/details/education/",
+        }
+        body = _SDUI_EDUCATION_PAGINATION_BODY_TEMPLATE.format(v=public_identifier, p=profile_id)
+        response = self._client.post(url, content=body, headers=headers)
+        self._check_auth_response(response, public_identifier)
+        return response.text
+
     def fetch_all_raw(self, public_identifier: str) -> dict:
         html = self.fetch_profile_html(public_identifier)
         subresources = {
@@ -257,4 +323,18 @@ class VoyagerClient:
             # Experimental path on top of an unofficial internal protocol —
             # never let it take down the rest of the response. See README.
             experience_flight = None
-        return {"html": html, "subresources": subresources, "experience_flight": experience_flight}
+
+        education_flight = None
+        profile_id = _extract_mini_profile_id(subresources)
+        if profile_id:
+            try:
+                education_flight = self.fetch_sdui_education_raw(public_identifier, profile_id)
+            except Exception:
+                education_flight = None
+
+        return {
+            "html": html,
+            "subresources": subresources,
+            "experience_flight": experience_flight,
+            "education_flight": education_flight,
+        }

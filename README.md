@@ -114,14 +114,41 @@ lines, `"<company> · <employment type>"` lines) — verified end-to-end against
 a real profile with mixed single- and multi-role-per-company layouts (see
 `tests/fixtures/experience_flight_sample.txt`, a real captured response).
 
-**Education and Skills remain unsolved.** They almost certainly use the same
-mechanism with a different `componentId` — `profileCardsEducationOnly` was a
-natural guess following the same naming convention, but it returns `500`
-(live-tested), meaning the real id uses some other naming scheme not found in
-the time available. Both are always returned as empty lists rather than
-guessed at further. Given these two are also exactly among the fields
-LinkedIn killed the classic REST endpoints for, this is the same anti-scraping
-boundary showing up a third time — see "Known limitations."
+**Attempt 5 — Education turned out to be a *different* SDUI action entirely.**
+Guessing `profileCardsEducationOnly` (following Experience's naming pattern,
+same `component` action) returned `500` — not a real access error, just the
+wrong id. The actual mechanism only showed up by capturing a full HAR while
+scrolling through Education, Projects, Skills, and Certifications together and
+listing every `rsc-action` request in it (`scripts/list_rsc_actions.py`).
+That surfaced a *third* distinct action type, used for a profile's full
+"details" page rather than the homepage card:
+
+```
+POST /flagship-web/rsc-action/actions/pagination
+     ?sduiid=com.linkedin.sdui.pagers.profile.details.education
+     &parentSpanId=<any base64 string>
+```
+
+Unlike the Experience `component` action, this one's POST body requires the
+profile's *opaque encoded id* (`ACoAA...`), not just the vanity name. That
+sounds like the same dead end hit in Attempt 1 — except this time there's
+already a source for it sitting in the pipeline: the same `MiniProfile` entity
+recovered opportunistically from bonus subresources (used for headline/photo)
+carries this exact id in its `entityUrn`. `_extract_mini_profile_id()` in
+`client.py` pulls it out, so Education fetches only run when that entity
+happened to be available — same conditionality as headline/photo, not a new
+limitation.
+
+Education's Flight response has a much simpler, more regular shape than
+Experience's (school → degree/field line → date range, no interleaved
+location/description noise to work around), and `parse_education_from_flight()`
+reconstructs it cleanly — verified against a real 3-entry response spanning a
+university and two schools (`tests/fixtures/education_flight_sample.txt`).
+
+**Skills remains unsolved.** Neither the `component` nor the `pagination`
+action's id for it was found in the time available — see "Known limitations."
+Given skills is also among the fields LinkedIn killed the classic REST
+endpoint for, this is the same anti-scraping boundary showing up a third time.
 
 ## Architecture
 
@@ -133,12 +160,15 @@ FastAPI app (app/main.py)
   │  validate URL, check cache
   ▼
 VoyagerClient.fetch_all_raw() (app/linkedin/client.py)
-  │  1. GET /in/{public_identifier}/            → page HTML (name via <title>)
+  │  1. GET /in/{public_identifier}/                 → page HTML (name via <title>)
   │  2. GET .../certifications, /languages,
-  │        /projects, /honors, ... (x10)         → subresource JSON
-  │  3. POST /flagship-web/rsc-action/.../component  → Experience, as a React
-  │        (experimental — see "How this was            Flight-format stream
-  │         reverse engineered")
+  │        /projects, /honors, ... (x10)              → subresource JSON
+  │                                                      (also yields MiniProfile:
+  │                                                       headline, photo, encoded id)
+  │  3. POST .../actions/component      (Experience)  → React Flight-format streams
+  │     POST .../actions/pagination     (Education)      (experimental — see
+  │        (needs the encoded id from step 2)              "How this was reverse
+  │                                                          engineered")
   ▼
 app/linkedin/flight.py → resolves Flight chunks, extracts visible text
   ▼
@@ -173,8 +203,10 @@ Other diagnostic scripts used during development, kept for reference:
 - `scripts/probe_endpoints.py <id>` — checks which per-section endpoints are alive
 - `scripts/inspect_html.py <id> "<phrase>"` — checks whether a phrase from the profile is server-rendered into the page HTML
 - `scripts/inspect_sdui.py <id> [experience|education|skills]` — tests the experimental SDUI "component" action directly
+- `scripts/inspect_education.py <id> <profile_id>` — tests the experimental SDUI "pagination" action for Education
+- `scripts/list_rsc_actions.py <har-file>` / `scripts/dump_har_entry.py <har-file> <index>` — inspect a HAR capture to find new SDUI actions
 - `scripts/parse_sdui_flight.py <path>` / `scripts/debug_tokens.py <path> <token>` — inspect a raw Flight response
-- `scripts/test_experience_parser.py <path>` — runs `parse_experience_from_flight()` against a saved response without a live fetch
+- `scripts/test_experience_parser.py <path>` / `scripts/test_education_parser.py <path>` — run the parsers against a saved response without a live fetch
 
 Run tests (these use a synthetic fixture, not live LinkedIn calls):
 
@@ -210,7 +242,15 @@ Response `200` (see `app/models.py` for the full schema):
       "description": null
     }
   ],
-  "education": [],
+  "education": [
+    {
+      "school": "Example University",
+      "degree": "Bachelor of Technology - BTech, Computer Science",
+      "field_of_study": null,
+      "date_range": { "start": "Jul 2021", "end": "Sep 2025" },
+      "description": null
+    }
+  ],
   "skills": [],
   "certifications": [
     { "name": "...", "issuer": "...", "issued_date": "2023-1", "credential_id": null, "credential_url": "..." }
@@ -248,23 +288,28 @@ Liveness check for deployment platforms.
 
 ## Known limitations
 
-- **Experience relies on an experimental, undocumented protocol.**
-  `parse_experience_from_flight()` reverse engineers LinkedIn's internal SDUI/
-  React Server Components wire format, reconstructed by hand from one real
-  capture — not a documented or stable API. It could break if LinkedIn changes
-  this internal format, and `fetch_sdui_component_raw()` is wrapped so that if
-  it ever fails, the rest of the response is unaffected (experience just comes
-  back empty rather than the whole request failing). Field accuracy is
-  best-effort: title is matched positionally against a separate part of the
-  component tree (correct across all layouts tested, but not by construction),
-  and description extraction is a token-noise heuristic tuned against a
-  multi-role-same-company + two single-role-company layout — unusual profile
-  structures (career breaks, self-employment, very long histories) haven't
-  been tested and may parse incompletely.
-- **Education and skills are not returned.** LinkedIn retired their classic
-  REST endpoints (`410 Gone`, confirmed live) and the same SDUI mechanism that
-  unlocked Experience needs a different, unconfirmed `componentId` for these
-  — see "How this was reverse engineered." Always returned as empty lists.
+- **Experience and Education rely on an experimental, undocumented protocol.**
+  Both parsers reverse engineer LinkedIn's internal SDUI/React Server
+  Components wire format, reconstructed by hand from real captures — not a
+  documented or stable API, and *two different* action types at that
+  (`component` vs `pagination`). Either could break if LinkedIn changes this
+  internal format; both fetches are wrapped so a failure never takes down the
+  rest of the response (that section just comes back empty). Field accuracy
+  is best-effort, verified only against the layouts actually captured:
+  Experience's title-matching and description extraction are heuristics tuned
+  against a multi-role-same-company + two single-role-company layout (career
+  breaks, self-employment, very long histories untested); Education's parser
+  is simpler and more regular but was only verified against a
+  university-plus-two-schools layout.
+- **Education additionally depends on a MiniProfile entity being available**
+  (same opportunistic source as headline/photo — see below) to supply the
+  profile's encoded id, which its request requires. A profile with no
+  content in `projects`/other bonus sections won't surface this, in which
+  case education comes back empty even if education data exists.
+- **Skills is not returned.** LinkedIn retired its classic REST endpoint
+  (`410 Gone`, confirmed live), and neither SDUI action's id for it was found
+  in the time available — see "How this was reverse engineered." Always
+  returned as an empty list.
 - **`about` and `location` are not currently extracted.** They may be
   server-rendered into the page HTML like the name is, but that wasn't
   confirmed, so rather than guess at fragile selectors, these fields are
