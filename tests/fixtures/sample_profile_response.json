@@ -1,0 +1,64 @@
+{
+  "_comment": "SYNTHETIC fixture hand-built to match the normalized {data, included} shape LinkedIn's Voyager GraphQL API uses. Not real captured data — used only to exercise parser.py logic. Replace/extend with real (redacted) $type names once you've run scripts/inspect_raw.py.",
+  "data": {},
+  "included": [
+    {
+      "$type": "com.linkedin.voyager.dash.identity.profile.Profile",
+      "entityUrn": "urn:li:fsd_profile:FAKEURN123",
+      "firstName": "Jane",
+      "lastName": "Doe",
+      "headline": "Software Engineer at ExampleCorp",
+      "geoLocationName": "Bengaluru, India",
+      "summary": "Building things with code."
+    },
+    {
+      "$type": "com.linkedin.voyager.dash.identity.profile.Position",
+      "title": "Software Engineer",
+      "companyName": "ExampleCorp",
+      "locationName": "Bengaluru, India",
+      "dateRange": {
+        "start": {"year": 2022, "month": 6},
+        "end": null
+      },
+      "description": "Working on backend systems."
+    },
+    {
+      "$type": "com.linkedin.voyager.dash.identity.profile.Education",
+      "schoolName": "Example University",
+      "degreeName": "B.Tech",
+      "fieldOfStudy": "Computer Science",
+      "dateRange": {
+        "start": {"year": 2018},
+        "end": {"year": 2022}
+      }
+    },
+    {
+      "$type": "com.linkedin.voyager.dash.identity.profile.Skill",
+      "name": "Python"
+    },
+    {
+      "$type": "com.linkedin.voyager.dash.identity.profile.Skill",
+      "name": "FastAPI"
+    },
+    {
+      "$type": "com.linkedin.voyager.dash.identity.profile.Certification",
+      "name": "Example Certification",
+      "authority": "Example Institute",
+      "date": {"year": 2023, "month": 1},
+      "url": "https://example.com/cert/123"
+    },
+    {
+      "$type": "com.linkedin.voyager.dash.identity.profile.Language",
+      "name": "English",
+      "proficiency": "Native or bilingual proficiency"
+    },
+    {
+      "$type": "com.linkedin.voyager.dash.identity.profile.ProfilePicture",
+      "rootUrl": "https://media.licdn.com/dms/image/example/",
+      "artifacts": [
+        {"fileIdentifyingUrlPathSegment": "200x200.jpg"},
+        {"fileIdentifyingUrlPathSegment": "400x400.jpg"}
+      ]
+    }
+  ]
+}

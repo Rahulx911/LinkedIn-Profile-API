@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.env
+!.env.example
+
+# local debug output from scripts/inspect_raw.py — contains raw LinkedIn data, never commit
+debug_output/
+*.raw.json
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+.DS_Store
+*.log
+
+.idea/
+.vscode/
