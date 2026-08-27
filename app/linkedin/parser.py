@@ -27,6 +27,7 @@ What's NOT available: skills. LinkedIn retired its REST endpoint (confirmed
 — see README "Known limitations". Always returned as an empty list.
 """
 
+import html as html_module
 import re
 from typing import Any
 
@@ -44,6 +45,16 @@ from app.models import (
 )
 
 TITLE_PATTERN = re.compile(r"<title>(.*?)\s*\|\s*LinkedIn</title>", re.IGNORECASE | re.DOTALL)
+
+# Best-effort — see parse_about_from_flight-style caveats in README. Location
+# is server-rendered directly in the page HTML (confirmed live), immediately
+# after a "<Company> · <School>" line in the top card. No structured JSON
+# field for it was found anywhere in the page, only this positional HTML
+# text, so this breaks if that specific adjacency doesn't hold (e.g. a
+# profile with no current company/school badges shown).
+LOCATION_PATTERN = re.compile(
+    r'<p class="[^"]*">[^<]*·[^<]*</p>\s*<div[^>]*>\s*<p class="[^"]*">([^<]{2,80})</p>'
+)
 
 EXCLUDED_TYPE_SUBSTRINGS = ("contributor", "miniprofile", "minicompany", "collectionresponse")
 
@@ -69,6 +80,14 @@ def _extract_name_from_title(html: str) -> str | None:
         return None
     name = match.group(1).strip()
     return name or None
+
+
+def _extract_location_from_html(html: str) -> str | None:
+    match = LOCATION_PATTERN.search(html)
+    if not match:
+        return None
+    location = html_module.unescape(match.group(1)).strip()
+    return location or None
 
 
 def _image_urls_from_picture(picture: dict[str, Any] | None) -> list[ProfileImage]:
@@ -587,7 +606,7 @@ def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:
         public_identifier=public_identifier,
         name=_extract_name_from_title(html),
         headline=mini_profile.get("occupation") if mini_profile else None,
-        location=None,  # not currently extracted — see README known limitations
+        location=_extract_location_from_html(html),
         about=parse_about_from_flight(raw.get("about_flight")),
         experience=parse_experience_from_flight(raw.get("experience_flight")),
         education=parse_education_from_flight(raw.get("education_flight")),
