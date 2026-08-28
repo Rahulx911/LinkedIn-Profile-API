@@ -27,6 +27,9 @@ EXPERIENCE_FLIGHT_THIRDPARTY4_FIXTURE = (
 EXPERIENCE_FLIGHT_THIRDPARTY5_FIXTURE = (
     Path(__file__).parent / "fixtures" / "experience_flight_thirdparty5_sample.txt"
 )
+EXPERIENCE_FLIGHT_THIRDPARTY6_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "experience_flight_thirdparty6_sample.txt"
+)
 EDUCATION_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "education_flight_sample.txt"
 EDUCATION_FLIGHT_THIRDPARTY_FIXTURE = (
     Path(__file__).parent / "fixtures" / "education_flight_thirdparty_sample.txt"
@@ -482,6 +485,44 @@ def test_parses_experience_with_title_and_company_but_no_employment_type():
     assert data_analytics.company == "Future Interns"
     assert data_analytics.location == "Remote"
     assert "During my internship at Future Interns" in data_analytics.description
+
+
+def test_grouped_company_with_per_role_locations_and_prose_that_looks_like_a_location():
+    # Real response captured live from an eighth profile. Two bugs, both
+    # fixed (see git history):
+    # (1) A grouped multi-role company (BlackBuck, 4 sub-roles) whose shared
+    #     summary line is "Full-time · 3 yrs 10 mos". That aggregate line was
+    #     falling through the loop and being misread as a title, which
+    #     cascaded the real first title into the company slot for all 4
+    #     sub-roles. Now the aggregate line is consumed up front, so every
+    #     sub-role keeps the real company name.
+    # (2) The Groww role's description ("...for Engineering, Product and
+    #     Design teams...") happened to match the bare "City, State" location
+    #     pattern (capitalized phrase, one comma) and was grabbed as the
+    #     location. The per-part length cap on that pattern now rejects it,
+    #     so it stays a description and location comes back None.
+    text = EXPERIENCE_FLIGHT_THIRDPARTY6_FIXTURE.read_text()
+    experiences = parse_experience_from_flight(text)
+    by_title = {e.title: e for e in experiences}
+
+    assert len(experiences) == 8
+
+    groww = by_title["People and Culture"]
+    assert groww.company == "Groww, India"
+    assert groww.location is None
+    assert "All things people" in groww.description
+
+    blackbuck_company = "BlackBuck (Zinka Logistics Solutions Pvt. Ltd.)"
+    for title in [
+        "Sr. Business HR Partner- Technology teams",
+        "Business HR Partner",
+        "Employee Experience Champion (Associate HR- Programs & Projects Manager)",
+        "Lead- HR",
+    ]:
+        assert by_title[title].company == blackbuck_company, title
+
+    # The aggregate summary line must NOT have become a role of its own.
+    assert "Full-time · 3 yrs 10 mos" not in by_title
 
 
 def test_experience_does_not_leak_location_across_unrelated_companies():

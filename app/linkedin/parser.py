@@ -226,9 +226,14 @@ _DATE_SINGLE_RE = re.compile(r"^([A-Z][a-z]{2} \d{4}) · .+$")
 _LOCATION_SUFFIX_RE = re.compile(r"^(?:.+ · )?(On-site|Remote|Hybrid)$")
 # Bare "City, State, Country" with no workplace-type suffix at all — a third
 # location format confirmed live (a role with no listed workplace type).
-# Requires each comma-separated part to start capitalized, which real
-# description sentences (lowercase words after the first) don't tend to do.
-_LOCATION_ADDRESS_RE = re.compile(r"^[A-Z][A-Za-z .'-]+(, [A-Z][A-Za-z .'-]+){1,3}$")
+# Requires each comma-separated part to start capitalized AND be short
+# (<= ~38 chars): real place names are short ("Bengaluru", "Karnataka",
+# "United States"), but a description sentence that happens to contain one
+# comma between two capitalized phrases (confirmed live: "...for Engineering,
+# Product and Design teams...") would otherwise match and get mistaken for a
+# location. The length cap on each part is what rejects that without
+# rejecting any real multi-part place name.
+_LOCATION_ADDRESS_RE = re.compile(r"^[A-Z][A-Za-z .'-]{1,38}(, [A-Z][A-Za-z .'-]{1,38}){1,3}$")
 
 # A bare country name with no city/state and no workplace-type suffix at all
 # — confirmed live on a role whose only location text was literally "India".
@@ -506,6 +511,20 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
             continue
         if tok in _EMPLOYMENT_TYPES:
             current_type = tok
+            i += 1
+            continue
+        aggregate = _TYPE_DURATION_AGGREGATE_RE.match(tok)
+        if aggregate and _DURATION_ONLY_RE.match(aggregate.group(2)):
+            # A grouped multi-role company's shared summary line, e.g.
+            # "Full-time · 3 yrs 10 mos" — it states the shared employment
+            # type and total tenure but is NOT a role/title of its own.
+            # Must be consumed here; otherwise it falls through to the
+            # identity-token rules below and gets misread as a pending title,
+            # which then cascades the real first title into the company slot
+            # for every sub-role (confirmed live on a profile with a
+            # 4-sub-role BlackBuck group). Distinct from a "Company · Type"
+            # line, which is matched earlier and has the opposite order.
+            current_type = aggregate.group(1)
             i += 1
             continue
         if _is_location_token(tok):

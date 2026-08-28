@@ -158,12 +158,13 @@ exact three retired. So those had to be recovered a different way:
   Experience) and `pagination` (for Education/Skills). This is the experimental,
   could-break-anytime part — see limitations.
 
-**Hardened against 6 real profiles.** The parsers were built and repeatedly
-corrected against six genuinely different real profiles (self-view and
-third-party, single/multi-role companies, co-authored publications, varied
-location formats). This caught real bugs a single test profile never would —
-e.g. a co-author's photo being returned as the profile owner's, titles shifting
-onto the wrong company, and country-only locations leaking into descriptions.
+**Hardened against 7 real profiles.** The parsers were built and repeatedly
+corrected against seven genuinely different real profiles (self-view and
+third-party, 1st- and 2nd-degree connections, single/multi-role and grouped
+companies, co-authored publications, varied location formats). This caught real
+bugs a single test profile never would — e.g. a co-author's photo being
+returned as the profile owner's, a grouped company's name getting lost across
+its sub-roles, and description text that happened to look like a location.
 The experience title/company logic was ultimately **generalized** (classifying
 the "identity" tokens before each role's date range by count, rather than
 piling on per-layout special cases) so the next unseen layout has a real chance
@@ -240,7 +241,7 @@ The same repo is also mirrored on Railway with the same setup.
   wire format** — reverse-engineered by hand, not a stable API. Any of them can
   break if LinkedIn changes the format; each fetch is isolated so a failure just
   empties that one section. Field accuracy is best-effort, verified against the
-  six real layouts captured (see Approach). Descriptions are a text-position
+  seven real layouts captured (see Approach). Descriptions are a text-position
   heuristic, and occasionally LinkedIn's own stream ordering places a field far
   from the rest of its role — not fixable by a local scan.
 
@@ -257,10 +258,17 @@ The same repo is also mirrored on Railway with the same setup.
   date if order matters).
 
 **Conditional / heuristic fields**
-- **`about` / `location`** are heuristic. `location` needs the top card's
-  `Company · School` line to anchor on (a single-badge card → `null`); `about`
-  picks the richest prose cluster and excludes known false positives, but an
-  unusual layout could still mislead it.
+- **`about` / `location`** are heuristic. `location` (top-card) needs the
+  `Company · School` line to anchor on, so a single-badge card (just a school,
+  or just a company) → `null`; `about` picks the richest prose cluster and
+  excludes known false positives, but an unusual layout could still mislead it.
+- **A bare single-word/city location** with no state, country, or
+  On-site/Remote/Hybrid suffix (e.g. a role listing just `"Bangalore"`) isn't
+  reliably recognized — a lone capitalized word is ambiguous with the first
+  word of a description, so it may be missed or land in the description. Full
+  place names (`"Bengaluru, Karnataka, India"`) and bare *country* names are
+  handled; individual bare city names deliberately are not, to avoid
+  misreading real description text as a location.
 - **`headline` / `profile_images`** depend on the `MiniProfile` entity being
   present at all; absent it, they're `null`/empty. When several are present
   (co-authors), the one matching the requested `publicIdentifier` is chosen.
