@@ -331,6 +331,67 @@ on distance alone. `location` came back `null` on this profile too — not a
 new bug, just the already-documented case of a top card with only one
 identity badge (no company, just a school, so no `"·"` to anchor on).
 
+**A sixth profile prompted stepping back from case-by-case patching toward a
+general model.** By this point, About had one more bug: a Featured-item
+component embeds several `FeFeaturedItemUrn(...)` internal object reprs —
+long (700+ chars), space-containing, and clustered tightly enough to outweigh
+the real About paragraph by raw length. Fixed with the same kind of targeted
+exclusion as the "Highlights" blurb (checking for the literal `"Urn("`
+substring no real prose would ever contain).
+
+Experience was the more significant one. This profile had a role with no
+employment-type marker anywhere — neither inline per-role nor a grouped
+aggregate line — so it rendered as bare title, then bare company, then
+straight to the date range. Every fix up to this point had been a new
+special-cased lookahead for whatever specific shape the newest profile
+happened to show, and this was the fourth distinct shape in six profiles;
+continuing to patch case-by-case wasn't going to converge. Before writing
+another special case, the actual resolved JSON was traced directly (not the
+flattened text) to check whether there's real tree structure being discarded
+that would let this be solved structurally instead of heuristically — there
+isn't: a single role's title, company, and date live in entirely separate
+top-level chunks with no shared ancestor, rendered through client-component
+references ($L<hex>) that are deliberately never resolved (resolving them
+was tried earlier in this project and caused severe cross-role duplication,
+since the same component definition is reused across many call sites with
+per-instance props this decoder doesn't extract). The flattened text stream
+really is the only signal available.
+
+Given that, the fix was to generalize rather than special-case again: the
+"identity" tokens before each role's date range (title and/or company — the
+two fields that can't be recognized by their own shape, only by what follows
+them) are now classified by how many unclassifiable tokens sit back-to-back
+before the next landmark (an employment type, "Company · Type" line,
+duration badge, location, or date) — 0, 1, or 2 — rather than a fixed set of
+lookahead shapes. A run of 2 is title-then-company with no type at all; a
+run of 1 falls to the existing pair of single-token rules; a run of 0 means
+nothing new to classify. This is a strictly larger rule that subsumes every
+shape seen across all six profiles under one mechanism (see
+`parse_experience_from_flight`'s docstring and `_is_role_landmark`), rather
+than a fifth special case bolted onto four existing ones — the intent is
+that the *next* new profile's shape has a real chance of already being
+covered, rather than guaranteeing another patch.
+
+One real regression surfaced while generalizing: the run-length-2 rule
+initially accepted any landmark as confirmation, which misfired against a
+stray company-profile URL sitting unclaimed near an already-fixed profile's
+data, misreading a real title as a "company" paired with that URL as a fake
+"title". Fixed by requiring the confirming token specifically be a date, not
+any landmark — a `"Company · Type"` line or bare type there means the second
+token isn't a real company at all, just noise ahead of an ordinary
+single-token case. Also hardened `_is_noise_token` to exclude bare URLs
+generally, matching a precedent `parse_about_from_flight` already had. All
+38 tests pass, including every real fixture from all six profiles.
+
+Not fixed by this: this same role's real description text was found (via
+direct inspection) sitting at a completely different position in the raw
+stream, nowhere near its own date range — LinkedIn's own stream ordering,
+not a heuristic gap, and not solvable by a smarter local scan since there's
+no reliable anchor connecting the two positions. What gets captured instead
+is a stray skill-tag string that happens to sit adjacent. Documented as an
+extension of the existing "stream order doesn't always match display order"
+limitation.
+
 ## Architecture
 
 ```
@@ -480,15 +541,26 @@ Liveness check for deployment platforms.
   format; every fetch is wrapped so a failure never takes down the rest of the
   response (that section just comes back empty). Field accuracy is
   best-effort, verified only against the layouts actually captured across
-  four real profiles: Experience's title-matching and description extraction
-  are heuristics tuned against self-view and third-party layouts, single- and
-  multi-role companies, and grouped multi-role companies both with per-role
-  and shared employment types (career breaks, self-employment, very long
-  histories untested); Education's parser handles both self-view and
-  third-party school-name rendering and both `"MMM YYYY"` and bare-year date
-  ranges; Skills' parser is the simplest of the three (no date/location
-  disambiguation) and now handles both self-view's "Edit" landmark and
-  third-party's "Endorse" button, tested on two profiles.
+  six real profiles: Experience's title/company extraction is now a
+  generalized rule keyed on how many unclassifiable "identity" tokens sit
+  before each role's date range (0/1/2 — see `parse_experience_from_flight`
+  and `_is_role_landmark`), tuned against self-view and third-party layouts,
+  single- and multi-role companies, grouped multi-role companies with both
+  per-role and shared employment types, and a role with no employment type
+  at all (career breaks, self-employment, very long histories, or a fifth
+  distinct identity-token shape untested — any new one would need extending
+  the same generalized rule, not another special case); description
+  extraction remains a token-noise heuristic, and — separately from
+  title/company — a specific field's text can sit at a stream position
+  unconnected to the rest of its own role (confirmed live: a real
+  description was found elsewhere in the stream while an unrelated skill-tag
+  string got captured in its place), which no local heuristic can catch
+  since there's no reliable anchor between the two positions. Education's
+  parser handles both self-view and third-party school-name rendering and
+  both `"MMM YYYY"` and bare-year date ranges; Skills' parser is the
+  simplest of the three (no date/location disambiguation) and handles both
+  self-view's "Edit" landmark and third-party's "Endorse" button, tested on
+  two profiles.
 - **Skills only returns the first page (10).** LinkedIn paginates skills via
   `start`/`count` in the request body; only `start=0` is fetched, so a profile
   with more than 10 skills will be missing the rest. Extending this to loop
@@ -498,20 +570,24 @@ Liveness check for deployment platforms.
   supply the profile's encoded id, which both their requests require. A
   profile with no content in `projects`/other bonus sections won't surface
   this, in which case both come back empty even if the data exists —
-  confirmed live on two of the four profiles tested during development.
-- **Experience entries aren't guaranteed to be in page-display order.**
-  Confirmed live on a third-party profile where one role appeared first in
-  the parsed output despite being third on the actual page. Each role's own
-  fields are still correctly grouped together — only the ordering between
-  roles can differ from what's visually shown.
+  confirmed live on two of the six profiles tested during development.
+- **Experience entries aren't guaranteed to be in page-display order, and
+  individual fields can be similarly displaced.** Confirmed live on one
+  profile where a whole role appeared first in the parsed output despite
+  being third on the actual page (each role's own fields were still
+  correctly grouped together there), and on another where just one role's
+  description text — not the whole role — sat at a stream position far from
+  the rest of that same role's fields, so the wrong (but adjacent) text got
+  captured instead.
 - **`about` and `location` are still heuristic**, though both are now
-  verified against three profiles each (see "How this was reverse
-  engineered"). `about` clusters long prose-like tokens by proximity and
-  returns the richest cluster, excluding the one known fixed-template false
-  positive (the "Highlights" mutual-education blurb) found so far — a
-  profile with some other unrelated large cluster of prose in the same
-  response (e.g. several long Featured post captions close together) could
-  still return the wrong text. `location` matches a specific positional
+  verified against four and three profiles respectively (see "How this was
+  reverse engineered"). `about` clusters long prose-like tokens by proximity
+  and returns the richest cluster, excluding the two known fixed-shape false
+  positives found so far (the "Highlights" mutual-education blurb, and
+  Featured-item `FeFeaturedItemUrn(...)` object reprs) — a profile with some
+  other unrelated large cluster of prose in the same response (e.g. several
+  long Featured post captions close together) could still return the wrong
+  text. `location` matches a specific positional
   adjacency in the page HTML (the `<p>` immediately after the top card's
   "`<Company> · <School>`" line, with real text required before the "·") — a
   profile whose top card shows only one identity badge (just a company, or

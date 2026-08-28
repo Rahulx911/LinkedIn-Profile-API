@@ -273,7 +273,9 @@ def _is_noise_token(token: str) -> bool:
         return True
     if _HASH_CLASS_RE.match(token):
         return True
-    if token.startswith(("$", "proto.", "com.linkedin.sdui", "/in/", "expandable_text_block_")):
+    if token.startswith(
+        ("$", "proto.", "com.linkedin.sdui", "/in/", "expandable_text_block_", "http")
+    ):
         return True
     if "auto-component-" in token or "auto-binding-" in token:
         return True
@@ -306,6 +308,31 @@ def _find_next_meaningful(tokens: list[str], start: int, limit: int = 12) -> str
         if not _is_noise_token(tokens[k]):
             return tokens[k]
     return None
+
+
+def _find_next_meaningful_idx(tokens: list[str], start: int, limit: int = 12) -> int | None:
+    for k in range(start, min(start + limit, len(tokens))):
+        if not _is_noise_token(tokens[k]):
+            return k
+    return None
+
+
+def _is_role_landmark(token: str) -> bool:
+    """A token that unambiguously marks a boundary in the role-card grammar
+    (see parse_experience_from_flight): an employment type, a combined
+    "Company · Type" line, a date range, a duration badge (plain or
+    aggregate), or a location. Anything that ISN'T one of these is an
+    "identity token" — title or company text — whose role can only be
+    determined by what comes after it, not by its own shape."""
+    return bool(
+        token in _EMPLOYMENT_TYPES
+        or _COMPANY_TYPE_RE.match(token)
+        or _DATE_RANGE_RE.match(token)
+        or _DATE_SINGLE_RE.match(token)
+        or _DURATION_ONLY_RE.match(token)
+        or _is_location_token(token)
+        or _TYPE_DURATION_AGGREGATE_RE.match(token)
+    )
 
 
 def _find_prev_meaningful(tokens: list[str], start: int, limit: int = 12) -> str | None:
@@ -342,6 +369,36 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
       with no range at all ("Aug 2026 · 1 mo", handled by _DATE_SINGLE_RE).
     Both sources are collected; the inline one takes priority per-role since
     it's unambiguous, falling back to the edit-landmark list by position.
+
+    The role-card grammar, generalized: this response has no structural
+    (tree-based) boundary between roles to exploit — confirmed by tracing
+    the actual resolved JSON, where a single role's title, company, and date
+    live in entirely separate top-level chunks with no shared ancestor
+    (they're rendered through client-component references we deliberately
+    don't resolve, since doing so causes cross-role duplication — see
+    flight.py). The flattened, ordered text stream is genuinely the only
+    signal available, so rather than adding a new special-cased lookahead
+    for each new profile's layout permutation (unsustainable — six real
+    profiles have already shown four different shapes), the "identity"
+    tokens before each date range (title and/or company — the two things
+    that can't be recognized by their own shape, only by what follows them)
+    are handled as a single generalized rule, keyed on how many
+    unclassifiable tokens sit back-to-back before the next `_is_role_landmark`
+    (an employment type, "Company · Type" line, duration badge, location, or
+    date):
+    - 0: nothing to classify — the role reuses sticky title/company state.
+    - 1: the single-token rules below decide title vs. company by what
+      immediately follows it (type/company-type/date → title;
+      duration/aggregate-duration → company).
+    - 2: title, then company, with no employment-type marker anywhere for
+      that role — confirmed live on a profile where an internship simply
+      had no type set. Handled by the dedicated two-part rule below (which
+      requires the token after the pair to be a DATE specifically, not any
+      landmark — a `_COMPANY_TYPE_RE` or bare-type match there means the
+      "second token" isn't really a company at all, just unrelated noise
+      ahead of an ordinary single-token title case; using any landmark as
+      confirmation caused exactly that misfire against a stray company-
+      profile URL in real data).
     """
     if not raw_text:
         return []
@@ -384,7 +441,16 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
             continue
         company_match = _COMPANY_TYPE_RE.match(tok)
         if company_match:
+            # Reset location here too (matches the bare-company rule below)
+            # — confirmed live on a profile where a new single-role company
+            # with no location of its own incorrectly inherited the
+            # PREVIOUS, unrelated company's sticky location instead of
+            # coming back null. The per-role peek a few lines down still
+            # sets it fresh from this role's own location token when one
+            # exists, so this reset only matters when there genuinely isn't
+            # one.
             current_company, current_type = company_match.group(1), company_match.group(2)
+            current_location = None
             i += 1
             continue
         if tok in _EMPLOYMENT_TYPES:
@@ -440,23 +506,27 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
                     continue
                 # An upcoming bare inline title for the *next* role (it can
                 # precede a bare employment type, a combined "Company · Type"
-                # line, or — for a grouped multi-role company where every
-                # sub-role shares one employment type, shown once in the
-                # group's aggregate line instead of per role, confirmed live —
-                # its own full date range directly) — stop here without
-                # consuming it, so the outer loop picks it up.
-                nxt_next = _find_next_meaningful(tokens, j + 1)
-                if (
-                    not _is_noise_token(nxt)
-                    and nxt_next is not None
-                    and (
+                # line, or its own full date range directly — the latter
+                # either because a grouped multi-role company shares one
+                # employment type in an aggregate line instead of per role,
+                # or because the role has no employment type at all, in
+                # which case a second bare token — the company — sits
+                # between it and the date; both confirmed live) — stop here
+                # without consuming it, so the outer loop picks it up.
+                nxt_next_idx = _find_next_meaningful_idx(tokens, j + 1)
+                nxt_next = tokens[nxt_next_idx] if nxt_next_idx is not None else None
+                if not _is_noise_token(nxt) and nxt_next is not None:
+                    if (
                         nxt_next in _EMPLOYMENT_TYPES
                         or _COMPANY_TYPE_RE.match(nxt_next)
                         or _DATE_RANGE_RE.match(nxt_next)
                         or _DATE_SINGLE_RE.match(nxt_next)
-                    )
-                ):
-                    break
+                    ):
+                        break
+                    if not _is_role_landmark(nxt_next):
+                        nxt_third = _find_next_meaningful(tokens, nxt_next_idx + 1)
+                        if nxt_third is not None and _is_role_landmark(nxt_third):
+                            break
                 if not _is_noise_token(nxt) and not _is_location_token(nxt):
                     desc_parts.append(nxt)
                 j += 1
@@ -485,6 +555,72 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
         # company name.
         next_meaningful = _find_next_meaningful(tokens, i + 1)
         aggregate_match = next_meaningful and _TYPE_DURATION_AGGREGATE_RE.match(next_meaningful)
+
+        # A run of TWO bare, otherwise-unclassifiable tokens back-to-back,
+        # immediately before a DATE RANGE specifically (not any landmark —
+        # narrower on purpose, see below) — confirmed live on a profile
+        # where a role had no employment-type marker at all (neither inline
+        # per-role nor a grouped aggregate line): title, then company, then
+        # straight to the date range. A single bare token can't be told
+        # apart as title vs. company without seeing what follows it (that's
+        # what the two single-token rules below already do); this
+        # run-length-2 case is the one shape neither of them covers, since
+        # both of *its* tokens are themselves unclassifiable until the date
+        # after the second one confirms it. First token is always the
+        # title, second is the company — handled on the next loop iteration
+        # by the dedicated branch below.
+        #
+        # Deliberately requires the third token to be a DATE, not any
+        # landmark: a stray junk token (e.g. a bare company-profile URL,
+        # confirmed live sitting unclaimed near a role's other landmarks)
+        # immediately before an ordinary single bare title would otherwise
+        # look identical to this shape if the check accepted a
+        # "Company · Type" line or bare employment type as confirmation too
+        # — but those cases are exactly what the single-hop title rule below
+        # already handles correctly on its own, with no second identity
+        # token involved at all.
+        if (
+            not _is_noise_token(tok)
+            and tok not in edit_landmark_titles
+            and next_meaningful is not None
+            and not _is_role_landmark(next_meaningful)
+            and next_meaningful not in edit_landmark_titles
+        ):
+            second_idx = _find_next_meaningful_idx(tokens, i + 1)
+            third = _find_next_meaningful(tokens, second_idx + 1) if second_idx is not None else None
+            if third is not None and (_DATE_RANGE_RE.match(third) or _DATE_SINGLE_RE.match(third)):
+                pending_title = tok
+                i += 1
+                continue
+        # The second half of the run-length-2 case above: a bare token right
+        # after an already-pending title, immediately before a date — the
+        # company for that pending title, in a layout with no type marker at
+        # all. Checked with its own guard (pending_title already set) so it
+        # can't be confused with the run-length-1 "bare company" rule below,
+        # which fires when NO title is pending yet.
+        if (
+            not _is_noise_token(tok)
+            and tok not in edit_landmark_titles
+            and pending_title is not None
+            and next_meaningful is not None
+            and (_DATE_RANGE_RE.match(next_meaningful) or _DATE_SINGLE_RE.match(next_meaningful))
+        ):
+            current_company = tok
+            current_type = None
+            current_location = None
+            i += 1
+            continue
+        # Bare company name (no " · <type>" suffix on the same line) —
+        # specifically one immediately followed by either a duration badge
+        # ("8 mos", "1 yr 8 mos") or a "<EmploymentType> · <duration>"
+        # aggregate line ("Full-time · 1 yr 8 mos", shown once for a grouped
+        # multi-role company when every sub-role shares the same type,
+        # confirmed live) — both of which only ever appear right after a
+        # company name, never after a title. This narrower confirmation (vs.
+        # also accepting employment type/location/date as confirmation) is
+        # what avoids misreading an inline title — e.g. on a third-party
+        # profile, "Computer vision intern" followed by "Internship" — as a
+        # company name.
         if (
             not _is_noise_token(tok)
             and tok not in edit_landmark_titles
@@ -507,9 +643,15 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
         # multi-role company's sub-role when every sub-role shares one
         # employment type — shown once in the group's aggregate line instead
         # of per role, confirmed live) — once it's clear this isn't a company
-        # name.
+        # name. Guarded by `pending_title is None` so it can't overwrite a
+        # title the run-length-2 rule above already claimed for this same
+        # token on a previous iteration (that title's own company — the
+        # second token in the run — also reaches this point, and would
+        # otherwise be misread as ANOTHER title since it too sits directly
+        # before the date).
         if (
-            not _is_noise_token(tok)
+            pending_title is None
+            and not _is_noise_token(tok)
             and tok not in edit_landmark_titles
             and next_meaningful is not None
             and (
@@ -680,7 +822,14 @@ def parse_about_from_flight(raw_text: str | None) -> str | None:
     recognizable fixed template (second-person, never how About prose reads)
     distinct from any real About content seen so far.
 
-    Still a heuristic, not a real field, and verified against three profiles
+    A profile with Featured items can also embed several `FeFeaturedItemUrn(
+    ...)` tokens — internal binding-key object reprs, not text, but long
+    (700+ chars) and space-containing enough to pass the prose check, and
+    clustered close enough together to outweigh the real About cluster by
+    raw length. Excluded by checking for the literal `"Urn("` substring any
+    real prose would never contain.
+
+    Still a heuristic, not a real field, and verified against four profiles
     — see README known limitations. Never raises."""
     if not raw_text:
         return None
@@ -698,6 +847,7 @@ def parse_about_from_flight(raw_text: str | None) -> str | None:
             and " " in tok
             and not _is_noise_token(tok)
             and not tok.startswith(("http", "com.linkedin", "proto.", "You both "))
+            and "Urn(" not in tok
         )
     ]
     if not candidates:

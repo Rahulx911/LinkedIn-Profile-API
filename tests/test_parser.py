@@ -21,6 +21,12 @@ EXPERIENCE_FLIGHT_THIRDPARTY2_FIXTURE = (
 EXPERIENCE_FLIGHT_THIRDPARTY3_FIXTURE = (
     Path(__file__).parent / "fixtures" / "experience_flight_thirdparty3_sample.txt"
 )
+EXPERIENCE_FLIGHT_THIRDPARTY4_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "experience_flight_thirdparty4_sample.txt"
+)
+EXPERIENCE_FLIGHT_THIRDPARTY5_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "experience_flight_thirdparty5_sample.txt"
+)
 EDUCATION_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "education_flight_sample.txt"
 EDUCATION_FLIGHT_THIRDPARTY_FIXTURE = (
     Path(__file__).parent / "fixtures" / "education_flight_thirdparty_sample.txt"
@@ -415,6 +421,72 @@ def test_parses_experience_with_grouped_multirole_companies_sharing_one_type():
     assert designer.company == "Makoons Play School"
     assert designer.date_range.start == "Feb 2023"
     assert designer.date_range.end == "Mar 2023"
+
+
+def test_parses_experience_with_title_and_company_but_no_employment_type():
+    # Real response captured live from a sixth profile — a role with NO
+    # employment-type marker at all, neither inline per-role nor a grouped
+    # aggregate line: bare title, then bare company, then straight to the
+    # date range. Previously (see git history) this shape wasn't recognized
+    # by either single-token rule (title-before-type/company-type/date, or
+    # company-before-duration/aggregate), since BOTH tokens are themselves
+    # unclassifiable until the date after the second one confirms it — the
+    # company name ("The Developers Arena") was misread as the title, with
+    # the real title silently dropped. Generalized into a run-length-2 rule
+    # (see parse_experience_from_flight) rather than another special case,
+    # verified here alongside every other real fixture with zero regressions.
+    #
+    # Known remaining gap, NOT fixed by this: this role's real description
+    # ("Cleaned and processed 50,000+ records...") sits at a completely
+    # different position in the raw stream (confirmed by direct inspection),
+    # nowhere near this role's own date range — LinkedIn's own stream
+    # ordering, not a heuristic gap. What gets captured instead is a skill
+    # tag string ("Data Science and Jupyter") that happens to sit adjacent.
+    # This assertion documents the current, known-imperfect behavior rather
+    # than silently allowing it to regress further.
+    text = EXPERIENCE_FLIGHT_THIRDPARTY4_FIXTURE.read_text()
+    experiences = parse_experience_from_flight(text)
+
+    assert len(experiences) == 3
+
+    data_science_intern, ml_intern, data_analytics = experiences
+
+    assert data_science_intern.title == "Data Science Intern"
+    assert data_science_intern.company == "The Developers Arena"
+    assert data_science_intern.date_range.start == "Nov 2025"
+    assert data_science_intern.date_range.end == "Jan 2026"
+
+    assert ml_intern.title == "Machine Learning Intern"
+    assert ml_intern.company == "Unified Mentor Private Limited"
+    assert ml_intern.location == "Gurugram, Haryana, India · Remote"
+    assert ml_intern.date_range.start == "Dec 2025"
+    assert ml_intern.date_range.end == "Feb 2026"
+    assert "Built 3 end-to-end ML pipelines" in ml_intern.description
+
+    assert data_analytics.title == "Data Science & Analytics"
+    assert data_analytics.company == "Future Interns"
+    assert data_analytics.location == "Remote"
+    assert "During my internship at Future Interns" in data_analytics.description
+
+
+def test_experience_does_not_leak_location_across_unrelated_companies():
+    # Real response captured live from a seventh profile: a new single-role
+    # company ("Tech Mahindra · Internship", a _COMPANY_TYPE_RE match) with
+    # no location of its own, appearing right after a JPMorganChase role
+    # that DID have one ("Bengaluru, Karnataka, India · On-site"). Previously
+    # (see git history), current_location was only reset to None on the
+    # bare-company rule, not this one, so Tech Mahindra incorrectly
+    # inherited JPMorganChase's location instead of coming back null — the
+    # real page shows no location for this role at all.
+    text = EXPERIENCE_FLIGHT_THIRDPARTY5_FIXTURE.read_text()
+    experiences = parse_experience_from_flight(text)
+    by_title = {e.title: e for e in experiences}
+
+    assert len(experiences) == 4
+    assert by_title["Software Intern"].company == "Tech Mahindra"
+    assert by_title["Software Intern"].location is None
+    assert by_title["Summer Intern"].company == "JPMorganChase"
+    assert by_title["Summer Intern"].location == "Bengaluru, Karnataka, India · On-site"
 
 
 def test_experience_parser_never_raises_on_garbage_input():
