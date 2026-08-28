@@ -1,11 +1,11 @@
 # LinkedIn Profile API
 
 Given a LinkedIn profile URL, returns structured JSON — name, headline,
-experience, education, skills, certifications, languages, profile images —
-plus several bonus sections beyond what was asked (projects, publications,
-volunteer experience, and more). No browser is used anywhere at runtime: every
-call is a plain HTTP request built to look like the ones LinkedIn's own web
-app makes.
+location, about, experience, education, skills, certifications, languages,
+profile images — plus several bonus sections beyond what was asked (projects,
+publications, volunteer experience, and more). No browser is used anywhere at
+runtime: every call is a plain HTTP request built to look like the ones
+LinkedIn's own web app makes.
 
 ## How this was reverse engineered
 
@@ -166,7 +166,30 @@ page is currently fetched — a profile with more than 10 skills will be
 missing the rest (see "Known limitations").
 
 With this, every core field the assignment asked for is populated with real
-data except `about` and `location` — see limitations below for exactly why.
+data.
+
+**Attempt 7 — About and Location, found in two different places.** About
+turned out to already be inside the same `above_activity` SDUI response used
+for the top card (componentId `profileCardsAboveActivity` covers Analytics,
+About, Featured, and Services together) — but not near the literal "About"
+heading token in the flattened text stream, which is what an initial hand
+inspection assumed. That inspection was looking at a de-duplicated view of the
+chunks; in the real (deliberately non-deduped, see `flight.py`) stream the
+heading and paragraph aren't adjacent at all. The fix: scan the whole stream
+for a single long (>60 char), prose-like string — distinctive enough in
+practice since Analytics/Featured/Services in this same response are short
+labels or empty, not prose.
+
+Location isn't in any JSON or Flight response at all — it's server-rendered
+directly into the profile page's plain HTML, immediately after the top card's
+"`<Company> · <School>`" line, with no structured field or wrapping element
+identifying it as a location. `_extract_location_from_html()` in `parser.py`
+matches that specific adjacency positionally. Both were verified against a
+real captured response/page (`tests/fixtures/about_flight_sample.txt`,
+`tests/fixtures/profile_html_sample.html`) but only on one profile — a profile
+with no current company/school shown in the top card won't have the preceding
+line at all, so location would come back `null` in that case (see "Known
+limitations").
 
 **Validated against a genuinely different, third-party profile.** Every
 capture above came from viewing my own profile — which turns out to matter:
@@ -294,8 +317,8 @@ Response `200` (see `app/models.py` for the full schema):
   "public_identifier": "some-person",
   "name": "Jane Doe",
   "headline": "Software Engineer at ExampleCorp",
-  "location": null,
-  "about": null,
+  "location": "India",
+  "about": "CS 2025 graduate passionate about building production-grade AI systems...",
   "experience": [
     {
       "title": "Software Developer",
@@ -381,10 +404,17 @@ Liveness check for deployment platforms.
   the parsed output despite being third on the actual page. Each role's own
   fields are still correctly grouped together — only the ordering between
   roles can differ from what's visually shown.
-- **`about` and `location` are not currently extracted.** They may be
-  server-rendered into the page HTML like the name is, but that wasn't
-  confirmed, so rather than guess at fragile selectors, these fields are
-  returned as `null`.
+- **`about` and `location` are heuristic, verified on only one profile.**
+  `about` returns the first sufficiently long (>60 char) prose-like string in
+  the `above_activity` Flight response — not anchored to the About section
+  itself, so a profile with other long prose (e.g. a Featured post caption)
+  ahead of it in the stream could return the wrong text. `location` matches a
+  specific positional adjacency in the page HTML (the `<p>` immediately after
+  the top card's "`<Company> · <School>`" line) — a profile with no current
+  company/school shown there won't match, and location comes back `null`.
+  Both are covered by real-fixture tests (see `tests/test_parser.py`) but only
+  against one captured profile; unlike Experience, they weren't re-verified
+  against the two third-party profiles used elsewhere in this project.
 - **`headline` and `profile_images` aren't guaranteed for every profile.**
   Both come from a `MiniProfile` entity that appears as a side effect in some
   subresource responses (e.g. `projects`) — a profile with none of those

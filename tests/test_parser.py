@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 
 from app.linkedin.parser import (
+    _extract_location_from_html,
+    parse_about_from_flight,
     parse_education_from_flight,
     parse_experience_from_flight,
     parse_profile,
@@ -18,6 +20,8 @@ EXPERIENCE_FLIGHT_THIRDPARTY2_FIXTURE = (
 )
 EDUCATION_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "education_flight_sample.txt"
 SKILLS_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "skills_flight_sample.txt"
+ABOUT_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "about_flight_sample.txt"
+PROFILE_HTML_FIXTURE = Path(__file__).parent / "fixtures" / "profile_html_sample.html"
 
 
 def load_fixture() -> dict:
@@ -297,3 +301,38 @@ def test_handles_missing_title_gracefully():
     profile = parse_profile(minimal, public_identifier="solo")
 
     assert profile.name is None
+
+
+def test_parses_about_from_real_captured_flight_response():
+    # Real response captured live (see README) from the experimental SDUI
+    # "component" action (componentId: profileCardsAboveActivity) — not
+    # synthetic, unlike the other fixtures.
+    text = ABOUT_FLIGHT_FIXTURE.read_text()
+    about = parse_about_from_flight(text)
+
+    assert about == (
+        "CS 2025 graduate passionate about building production-grade AI "
+        "systems. Currently building computer vision pipelines and "
+        "ML-integrated microservices at Delhivery. Semi-finalist at "
+        "Flipkart Grid 6.0."
+    )
+
+
+def test_about_parser_never_raises_on_garbage_input():
+    assert parse_about_from_flight("not a real flight response") is None
+    assert parse_about_from_flight("") is None
+    assert parse_about_from_flight(None) is None
+
+
+def test_extracts_location_from_real_captured_html():
+    # Real page HTML excerpt captured live (see README) — the "<Company> ·
+    # <School>" line followed immediately by the location <p>, copied
+    # verbatim (real class names/structure intact).
+    html = PROFILE_HTML_FIXTURE.read_text()
+
+    assert _extract_location_from_html(html) == "India"
+
+
+def test_location_parser_never_raises_on_garbage_input():
+    assert _extract_location_from_html("not real html") is None
+    assert _extract_location_from_html("") is None
