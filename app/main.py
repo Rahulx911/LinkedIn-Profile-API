@@ -92,6 +92,22 @@ def get_client() -> VoyagerClient:
     )
 
 
+@app.api_route("/", methods=["GET", "HEAD"])
+def root() -> dict:
+    # A landing response for the base URL — gives a useful 200 instead of a
+    # bare 404, and lets a platform health check that probes "/" (rather than
+    # the configured /healthz), with either GET or HEAD, pass. A HEAD probe to
+    # "/" returning 404/405 is what caused a deploy to report "Timed Out"
+    # even though the service was up.
+    return {
+        "service": "LinkedIn Profile API",
+        "status": "ok",
+        "docs": "/docs",
+        "health": "/healthz",
+        "profile_endpoint": "POST /api/v1/profile",
+    }
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"status": "ok"}
