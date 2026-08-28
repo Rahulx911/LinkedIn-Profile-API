@@ -493,7 +493,9 @@ pytest
 
 ## Deployment
 
-Live at: **TODO — add the Render URL once deployed**
+Live at: **https://linkedin-profile-api-526f.onrender.com**
+([`/healthz`](https://linkedin-profile-api-526f.onrender.com/healthz),
+[interactive API docs](https://linkedin-profile-api-526f.onrender.com/docs))
 
 Deployed on [Render](https://render.com) as a Docker web service, built directly
 from the `Dockerfile` in this repo:

@@ -1,4 +1,5 @@
 import re
+import sys
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -25,7 +26,35 @@ app = FastAPI(
     version="1.0.0",
 )
 
+
+def _log_startup_config_check(settings) -> None:
+    """Safe startup diagnostic — reports whether each secret was actually
+    read from the environment, and its length, but NEVER the value itself.
+    A 999 "automated behavior detected" response from LinkedIn looks
+    identical whether the real cause is IP-based bot detection or a
+    malformed/truncated cookie (e.g. from a copy-paste into a platform's web
+    form), so this rules the latter in or out from the deployment's own
+    logs without ever exposing the secret in them."""
+    cookie = settings.li_at_cookie
+    print(
+        "Startup config check: LI_AT_COOKIE "
+        + (f"set ({len(cookie)} chars)" if cookie else "MISSING/EMPTY"),
+        file=sys.stderr,
+    )
+    jsessionid = settings.jsessionid
+    if jsessionid:
+        quoted = jsessionid.startswith('"') and jsessionid.endswith('"')
+        print(
+            f"Startup config check: JSESSIONID set ({len(jsessionid)} chars, "
+            + ("has surrounding quotes)" if quoted else "MISSING surrounding quotes — see .env.example)"),
+            file=sys.stderr,
+        )
+    else:
+        print("Startup config check: JSESSIONID not set", file=sys.stderr)
+
+
 settings = get_settings()
+_log_startup_config_check(settings)
 _cache = TTLCache(ttl_seconds=settings.profile_cache_ttl_seconds)
 
 PROFILE_URL_PATTERN = re.compile(
