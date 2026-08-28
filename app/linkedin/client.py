@@ -184,21 +184,37 @@ BASE_HEADERS = {
 }
 
 
-def _extract_mini_profile_id(subresources: dict) -> str | None:
+def _extract_mini_profile_id(subresources: dict, public_identifier: str) -> str | None:
     """Finds the profile's opaque encoded id (the "ACoAA..." form) from a
     MiniProfile entity opportunistically present in some subresource
     responses (same source parser.py uses for headline/photo). Needed as
     input to fetch_sdui_education_raw(), which — unlike the experience
-    component action — requires this id, not just the vanity name."""
+    component action — requires this id, not just the vanity name.
+
+    A subresource can embed more than one MiniProfile — confirmed live on a
+    profile with several co-authored publications, each listing its other
+    authors as their own Contributor→MiniProfile. The first one found isn't
+    necessarily the profile owner's (parser.py's _find_mini_profile had the
+    exact same bug, confirmed there via a co-author's occupation/photo
+    leaking into the response), so prefer the entity whose own
+    publicIdentifier matches the profile actually being fetched; fall back
+    to the first one found only when none match."""
+    candidates: list[dict] = []
     for raw in subresources.values():
         if not raw or not isinstance(raw.get("included"), list):
             continue
         for entity in raw["included"]:
             if "miniprofile" in str(entity.get("$type", "")).lower():
-                urn = entity.get("entityUrn", "")
-                if ":" in urn:
-                    return urn.rsplit(":", 1)[-1]
-    return None
+                candidates.append(entity)
+
+    def _id_from(entity: dict) -> str | None:
+        urn = entity.get("entityUrn", "")
+        return urn.rsplit(":", 1)[-1] if ":" in urn else None
+
+    for entity in candidates:
+        if entity.get("publicIdentifier") == public_identifier:
+            return _id_from(entity)
+    return _id_from(candidates[0]) if candidates else None
 
 
 class VoyagerClient:
@@ -398,7 +414,7 @@ class VoyagerClient:
 
         education_flight = None
         skills_flight = None
-        profile_id = _extract_mini_profile_id(subresources)
+        profile_id = _extract_mini_profile_id(subresources, public_identifier)
         if profile_id:
             try:
                 education_flight = self.fetch_sdui_education_raw(public_identifier, profile_id)

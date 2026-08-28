@@ -33,6 +33,9 @@ ABOUT_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "about_flight_sample
 ABOUT_FLIGHT_THIRDPARTY_FIXTURE = (
     Path(__file__).parent / "fixtures" / "about_flight_thirdparty_sample.txt"
 )
+ABOUT_FLIGHT_THIRDPARTY2_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "about_flight_thirdparty2_sample.txt"
+)
 PROFILE_HTML_FIXTURE = Path(__file__).parent / "fixtures" / "profile_html_sample.html"
 PROFILE_HTML_THIRDPARTY_FIXTURE = (
     Path(__file__).parent / "fixtures" / "profile_html_thirdparty_sample.html"
@@ -500,6 +503,78 @@ def test_parses_multi_paragraph_about_from_real_thirdparty_profile():
         "connect and collaborate to create meaningful and impactful "
         "solutions!"
     )
+
+
+def test_parses_about_excluding_nearby_highlights_blurb():
+    # Real response captured live from a fifth profile — the "Highlights"
+    # mutual-education blurb ("You both studied at X from <date> to <date>")
+    # sat only 7 tokens before the real About and got merged into the same
+    # cluster, prepending unrelated text (see git history). This profile's
+    # About is a single paragraph, so any leak is immediately visible in the
+    # exact-match assertion below.
+    text = ABOUT_FLIGHT_THIRDPARTY2_FIXTURE.read_text()
+    about = parse_about_from_flight(text)
+
+    assert about == (
+        "Hi! I am Abhyudoy Chaki. A 21 Year Old B Tech Computer Science "
+        "student at Vellore Institute of Technology. I am a passionate "
+        "learner and I love to try out various fields of technology. "
+        "Recently, I have developed an affinity towards understanding Data "
+        "Science and Building Machine Learning Models. I am also actively "
+        "working on Research Papers in Artificial Neural Network (ANN "
+        "systems) and Genetic Algorithms. I also love doing Web "
+        "Development. Having learned React, my web development skills are "
+        "improving day by day, and I am also actively working on backend "
+        "development. Apart from this, I am also interested in Android "
+        "Development in Java and I have created apps that reflect my keen "
+        "interest. I wish to learn more, work with and deliver best "
+        "technologies to the world!"
+    )
+    assert "You both studied" not in about
+
+
+def test_finds_correct_mini_profile_when_multiple_are_present():
+    # A subresource can embed more than one MiniProfile — e.g. co-authors on
+    # a publication, each their own Contributor->MiniProfile. Real bug (see
+    # git history): picking the first one found returned a co-author's
+    # occupation ("--") and profile photo instead of the profile owner's.
+    # The wrong one is inserted FIRST here to prove selection is by
+    # publicIdentifier match, not list order.
+    fixture = load_fixture()
+    fixture["subresources"]["projects"]["included"].insert(
+        0,
+        {
+            "$type": "com.linkedin.voyager.identity.shared.MiniProfile",
+            "firstName": "Co",
+            "lastName": "Author",
+            "occupation": "--",
+            "publicIdentifier": "some-coauthor",
+            "picture": {
+                "rootUrl": "https://media.licdn.com/dms/image/coauthor/",
+                "artifacts": [
+                    {"width": 200, "height": 200, "fileIdentifyingUrlPathSegment": "200x200.jpg"}
+                ],
+            },
+        },
+    )
+    profile = parse_profile(fixture, public_identifier="janedoe")
+
+    assert profile.headline == "Software Engineer at ExampleCorp"
+    assert profile.profile_images[0].url == (
+        "https://media.licdn.com/dms/image/example/200x200.jpg"
+    )
+
+
+def test_falls_back_to_first_mini_profile_when_none_match_identifier():
+    # If no MiniProfile's publicIdentifier matches (shouldn't normally
+    # happen, but the subresource data isn't a documented contract), fall
+    # back to the first one found rather than returning nothing — matches
+    # the original opportunistic-recovery behavior when there's no better
+    # signal available.
+    fixture = load_fixture()
+    profile = parse_profile(fixture, public_identifier="not-in-the-fixture-at-all")
+
+    assert profile.headline == "Software Engineer at ExampleCorp"
 
 
 def test_extracts_location_skipping_connection_degree_badge_false_positive():

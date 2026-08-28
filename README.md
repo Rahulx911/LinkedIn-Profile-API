@@ -300,6 +300,37 @@ All fixes were re-verified against every existing fixture (no regressions)
 plus this profile's real captured data, matching the page exactly across all
 7 experience entries, all 3 education entries, and the first page of skills.
 
+**A fifth profile — with multiple co-authored publications — surfaced the
+most serious bug found during this project: headline and profile photo can
+be attributed to the wrong person entirely.** `headline`/`profile_images`
+come from a `MiniProfile` entity recovered opportunistically from subresource
+responses (see "Getting the name and headline anyway" above); the code
+picked the *first* MiniProfile found anywhere in those responses, silently
+assuming there'd only ever be one. This profile's `publications` section
+lists each paper's other authors, and each one is its own
+`Contributor`→`MiniProfile` entity — so the first one found was a co-author's,
+not the profile owner's. The result wasn't a missing field, which would at
+least be visible — it was a stranger's occupation (literally the string
+`"--"`, that co-author's actual headline placeholder) and, more seriously,
+**her profile photo**, returned as if they belonged to the profile being
+looked up. Fixed by matching each MiniProfile candidate's own
+`publicIdentifier` field against the profile actually being fetched, falling
+back to the first one found only when none match — same fix applied to both
+`parser.py`'s headline/photo recovery and `client.py`'s Education/Skills
+`profile_id` sourcing, which had the identical bug (silently unobserved so
+far — LinkedIn's pagination endpoint appears to key off the vanity name
+regardless, but this was luck, not a guarantee).
+
+This same profile also showed the About-clustering fix from the previous
+round isn't fully safe: the "Highlights" mutual-education blurb sat only 7
+tokens before the real About text (vs. 18 on the profile that first
+motivated the distance-based clustering), close enough to merge into the
+same cluster and prepend unrelated text. Fixed with an explicit exclusion for
+that blurb's fixed template (`"You both studied at..."`) rather than relying
+on distance alone. `location` came back `null` on this profile too — not a
+new bug, just the already-documented case of a top card with only one
+identity badge (no company, just a school, so no `"·"` to anchor on).
+
 ## Architecture
 
 ```
@@ -474,20 +505,29 @@ Liveness check for deployment platforms.
   fields are still correctly grouped together — only the ordering between
   roles can differ from what's visually shown.
 - **`about` and `location` are still heuristic**, though both are now
-  verified against two profiles each (see "How this was reverse engineered").
-  `about` clusters long prose-like tokens by proximity and returns the
-  richest cluster — not anchored to the About section itself, so a profile
-  with an unrelated large cluster of prose elsewhere in the same response
-  (e.g. several long Featured post captions close together) could still
-  return the wrong text. `location` matches a specific positional adjacency
-  in the page HTML (the `<p>` immediately after the top card's
+  verified against three profiles each (see "How this was reverse
+  engineered"). `about` clusters long prose-like tokens by proximity and
+  returns the richest cluster, excluding the one known fixed-template false
+  positive (the "Highlights" mutual-education blurb) found so far — a
+  profile with some other unrelated large cluster of prose in the same
+  response (e.g. several long Featured post captions close together) could
+  still return the wrong text. `location` matches a specific positional
+  adjacency in the page HTML (the `<p>` immediately after the top card's
   "`<Company> · <School>`" line, with real text required before the "·") — a
-  profile with no current company/school shown there won't match, and
-  location comes back `null`.
+  profile whose top card shows only one identity badge (just a company, or
+  just a school, with no "·" joining two) won't match, and location comes
+  back `null`; confirmed live on a real profile with only a school badge.
 - **`headline` and `profile_images` aren't guaranteed for every profile.**
   Both come from a `MiniProfile` entity that appears as a side effect in some
   subresource responses (e.g. `projects`) — a profile with none of those
   sections populated won't surface it, and both fields will be `null`/empty.
+  When more than one MiniProfile is present (e.g. a publication's other
+  authors), the one whose `publicIdentifier` matches the profile being
+  fetched is preferred — confirmed necessary live on a profile where the
+  first one found belonged to a co-author instead, returning her occupation
+  and photo. If somehow none match, it falls back to the first one found
+  rather than nothing, so a similar mismatch remains possible in principle
+  on data shaped differently from anything captured so far.
 - **Account risk.** LinkedIn's Terms of Service prohibit automated scraping
   and can restrict the account whose cookie is used here. This was built and
   tested against my own primary LinkedIn account, accepting that tradeoff for

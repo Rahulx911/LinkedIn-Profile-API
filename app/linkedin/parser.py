@@ -74,11 +74,26 @@ def _all_included(subresources: dict[str, dict | None]) -> list[dict]:
     return entities
 
 
-def _find_mini_profile(subresources: dict[str, dict | None]) -> dict | None:
-    for entity in _all_included(subresources):
-        if "miniprofile" in str(entity.get("$type", "")).lower():
+def _find_mini_profile(
+    subresources: dict[str, dict | None], public_identifier: str
+) -> dict | None:
+    """A subresource can embed MORE THAN ONE MiniProfile — confirmed live on
+    a profile with several co-authored publications, where each "Other
+    authors" entry is its own Contributor→MiniProfile. Picking just the
+    first one found is wrong whenever it isn't the profile owner's: on that
+    profile it returned a co-author's occupation and, worse, her profile
+    photo, attributed to the wrong person entirely. Every MiniProfile
+    carries its own `publicIdentifier`, so prefer the one matching the
+    profile actually being fetched; fall back to the first one found only
+    when none match (still better than nothing for the headline/photo
+    opportunistic-recovery case this was always built around)."""
+    candidates = [
+        e for e in _all_included(subresources) if "miniprofile" in str(e.get("$type", "")).lower()
+    ]
+    for entity in candidates:
+        if entity.get("publicIdentifier") == public_identifier:
             return entity
-    return None
+    return candidates[0] if candidates else None
 
 
 def _extract_name_from_title(html: str) -> str | None:
@@ -655,9 +670,18 @@ def parse_about_from_flight(raw_text: str | None) -> str | None:
     education blurb, a skills summary line — sit much farther from any other
     candidate) and return the cluster with the most total text, joined in
     order. A single-paragraph About is just a cluster of one, so this
-    subsumes the original behavior. Still a heuristic, not a real field, and
-    verified against only two profiles — see README known limitations.
-    Never raises."""
+    subsumes the original behavior.
+
+    The "Highlights" blurb itself ("You both studied at X from <date> to
+    <date>") isn't always far enough away to land in its own cluster —
+    confirmed live on a second profile where it sat only 7 tokens before the
+    real About and got merged in, prepending unrelated text. Excluded
+    explicitly rather than relying on distance alone, since it's a
+    recognizable fixed template (second-person, never how About prose reads)
+    distinct from any real About content seen so far.
+
+    Still a heuristic, not a real field, and verified against three profiles
+    — see README known limitations. Never raises."""
     if not raw_text:
         return None
 
@@ -673,7 +697,7 @@ def parse_about_from_flight(raw_text: str | None) -> str | None:
             len(tok) > 60
             and " " in tok
             and not _is_noise_token(tok)
-            and not tok.startswith(("http", "com.linkedin", "proto."))
+            and not tok.startswith(("http", "com.linkedin", "proto.", "You both "))
         )
     ]
     if not candidates:
@@ -694,7 +718,7 @@ def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:
     html = raw.get("html", "")
     subresources: dict[str, dict | None] = raw.get("subresources", {})
 
-    mini_profile = _find_mini_profile(subresources)
+    mini_profile = _find_mini_profile(subresources, public_identifier)
 
     return ProfileResponse(
         public_identifier=public_identifier,
