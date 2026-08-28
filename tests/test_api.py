@@ -10,6 +10,7 @@ from app.linkedin.exceptions import (
     ProfileNotAccessibleError,
     ProfileNotFoundError,
     RateLimitedError,
+    UpstreamError,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_profile_response.json"
@@ -65,6 +66,7 @@ def test_returns_parsed_profile_for_valid_url(monkeypatch):
         (ProfileNotAccessibleError("private"), 403),
         (ProfileNotFoundError("missing"), 404),
         (RateLimitedError("throttled"), 429),
+        (UpstreamError("timed out"), 502),
     ],
 )
 def test_maps_linkedin_errors_to_http_status(monkeypatch, exc, expected_status):

@@ -52,8 +52,15 @@ TITLE_PATTERN = re.compile(r"<title>(.*?)\s*\|\s*LinkedIn</title>", re.IGNORECAS
 # field for it was found anywhere in the page, only this positional HTML
 # text, so this breaks if that specific adjacency doesn't hold (e.g. a
 # profile with no current company/school badges shown).
+#
+# The first "·"-containing <p> must have real text before the "·" (`[^<]+·`,
+# not `[^<]*·`) — found live on a third-party profile where a mutual-
+# connections widget's "· 1st"/"· 2nd" degree badge (bullet with NO leading
+# text) matches the same <p>·</p><div><p> shape and sits earlier in the page
+# than the real top card, so a bare `*` matched that badge instead and
+# captured a neighboring badge's text ("· 2nd") as the "location".
 LOCATION_PATTERN = re.compile(
-    r'<p class="[^"]*">[^<]*·[^<]*</p>\s*<div[^>]*>\s*<p class="[^"]*">([^<]{2,80})</p>'
+    r'<p class="[^"]*">[^<]+·[^<]*</p>\s*<div[^>]*>\s*<p class="[^"]*">([^<]{2,80})</p>'
 )
 
 EXCLUDED_TYPE_SUBSTRINGS = ("contributor", "miniprofile", "minicompany", "collectionresponse")
@@ -221,11 +228,21 @@ _EMPLOYMENT_TYPES = {
 _COMPANY_TYPE_RE = re.compile(
     r"^(.+?) · (" + "|".join(re.escape(t) for t in _EMPLOYMENT_TYPES) + r")$"
 )
+# A grouped multi-role company's aggregate summary line — shown once at the
+# top of the group when every sub-role shares the same employment type (see
+# _is_bare_company_confirmation docstring below), e.g. "Full-time · 1 yr 8 mos".
+_TYPE_DURATION_AGGREGATE_RE = re.compile(
+    r"^(" + "|".join(re.escape(t) for t in _EMPLOYMENT_TYPES) + r") · (.+)$"
+)
 _HASH_CLASS_RE = re.compile(r"^[_a-f0-9]{6,}( [_a-f0-9]{6,})*$")
 _NOISE_TOKENS = {"more", "Expanded", "Collapsed", "br", "open"}
 _POSITION_ID_RE = re.compile(r"^\d{6,}$")
 _ID_LIKE_RE = re.compile(r"^[A-Za-z0-9]{16,}$")
-_DURATION_ONLY_RE = re.compile(r"^\d+\s+(mos?|yrs?)$")
+# A cumulative duration badge, e.g. "10 mos", "2 yrs", or the combined
+# "1 yr 8 mos" — confirmed live as a grouped company's total across all its
+# sub-roles (single-unit forms were the only ones an earlier profile happened
+# to show; the combined form showed up on a profile with a longer tenure).
+_DURATION_ONLY_RE = re.compile(r"^\d+\s+yrs?(?:\s+\d+\s+mos?)?$|^\d+\s+mos?$")
 # UI style/property values (font, alignment, sizing, generic tag names) that
 # leak into the text stream alongside real content. Recognized generically —
 # a single lowercase-leading word, no spaces — rather than by exact value,
@@ -407,14 +424,22 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
                     j += 1
                     continue
                 # An upcoming bare inline title for the *next* role (it can
-                # precede either a bare employment type or a combined
-                # "Company · Type" line, depending on layout) — stop here
-                # without consuming it, so the outer loop picks it up.
+                # precede a bare employment type, a combined "Company · Type"
+                # line, or — for a grouped multi-role company where every
+                # sub-role shares one employment type, shown once in the
+                # group's aggregate line instead of per role, confirmed live —
+                # its own full date range directly) — stop here without
+                # consuming it, so the outer loop picks it up.
                 nxt_next = _find_next_meaningful(tokens, j + 1)
                 if (
                     not _is_noise_token(nxt)
                     and nxt_next is not None
-                    and (nxt_next in _EMPLOYMENT_TYPES or _COMPANY_TYPE_RE.match(nxt_next))
+                    and (
+                        nxt_next in _EMPLOYMENT_TYPES
+                        or _COMPANY_TYPE_RE.match(nxt_next)
+                        or _DATE_RANGE_RE.match(nxt_next)
+                        or _DATE_SINGLE_RE.match(nxt_next)
+                    )
                 ):
                     break
                 if not _is_noise_token(nxt) and not _is_location_token(nxt):
@@ -433,18 +458,26 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
             i = j
             continue
         # Bare company name (no " · <type>" suffix on the same line) —
-        # specifically one immediately followed by a duration badge ("8 mos"),
-        # which only ever appears right after a company name, never after a
-        # title. This narrower confirmation (vs. also accepting employment
-        # type/location/date as confirmation) is what avoids misreading an
-        # inline title — e.g. on a third-party profile, "Computer vision
-        # intern" followed by "Internship" — as a company name.
+        # specifically one immediately followed by either a duration badge
+        # ("8 mos", "1 yr 8 mos") or a "<EmploymentType> · <duration>"
+        # aggregate line ("Full-time · 1 yr 8 mos", shown once for a grouped
+        # multi-role company when every sub-role shares the same type,
+        # confirmed live) — both of which only ever appear right after a
+        # company name, never after a title. This narrower confirmation (vs.
+        # also accepting employment type/location/date as confirmation) is
+        # what avoids misreading an inline title — e.g. on a third-party
+        # profile, "Computer vision intern" followed by "Internship" — as a
+        # company name.
         next_meaningful = _find_next_meaningful(tokens, i + 1)
+        aggregate_match = next_meaningful and _TYPE_DURATION_AGGREGATE_RE.match(next_meaningful)
         if (
             not _is_noise_token(tok)
             and tok not in edit_landmark_titles
             and next_meaningful is not None
-            and _DURATION_ONLY_RE.match(next_meaningful)
+            and (
+                _DURATION_ONLY_RE.match(next_meaningful)
+                or (aggregate_match and _DURATION_ONLY_RE.match(aggregate_match.group(2)))
+            )
         ):
             current_company = tok
             current_type = None
@@ -453,14 +486,23 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
             i += 1
             continue
         # Bare inline title (third-party-profile layout) — a standalone token
-        # immediately followed by either a bare employment type or a combined
+        # immediately followed by either a bare employment type, a combined
         # "Company · Type" line (single-role companies show title *before*
-        # that combined line), once it's clear this isn't a company name.
+        # that combined line), or its own full date range directly (a grouped
+        # multi-role company's sub-role when every sub-role shares one
+        # employment type — shown once in the group's aggregate line instead
+        # of per role, confirmed live) — once it's clear this isn't a company
+        # name.
         if (
             not _is_noise_token(tok)
             and tok not in edit_landmark_titles
             and next_meaningful is not None
-            and (next_meaningful in _EMPLOYMENT_TYPES or _COMPANY_TYPE_RE.match(next_meaningful))
+            and (
+                next_meaningful in _EMPLOYMENT_TYPES
+                or _COMPANY_TYPE_RE.match(next_meaningful)
+                or _DATE_RANGE_RE.match(next_meaningful)
+                or _DATE_SINGLE_RE.match(next_meaningful)
+            )
         ):
             pending_title = tok
             i += 1
@@ -479,19 +521,35 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
     ]
 
 
-_EDU_EDIT_PREFIX_RE = re.compile(r"^Edit education (.+)$")
-_EDU_DATE_RANGE_RE = re.compile(r"^([A-Za-z]{3} \d{4}) [–-] (Present|[A-Za-z]{3} \d{4})$")
+_EDU_DATE_RANGE_RE = re.compile(
+    r"^((?:[A-Za-z]{3} )?\d{4}) [–-] (Present|(?:[A-Za-z]{3} )?\d{4})$"
+)
 
 
 def parse_education_from_flight(raw_text: str | None) -> list[Education]:
     """Experimental — see README "How this was reverse engineered" and
     "Known limitations". Heuristically reconstructs Education entries from
     LinkedIn's SDUI "Flight" wire format response — same underlying protocol
-    as parse_experience_from_flight(), but a much simpler layout: school name
-    (reliably sourced from "Edit education <School>" text, the same kind of
-    edit-form landmark used for experience titles), then a degree/field line,
-    then a date range using an en dash ("–"), immediately adjacent — no
-    location/description clutter to work around. Never raises.
+    as parse_experience_from_flight(), but a much simpler layout: school name,
+    then a degree/field line, then a date range using an en dash ("–"),
+    immediately adjacent — no location/description clutter to work around.
+
+    School name previously came from "Edit education <School>" text — a
+    self-view-only edit-form landmark, clustered together separately from the
+    actual entries earlier in the stream (same structural split found in
+    Experience's position-id landmarks). That only ever worked by index
+    coincidence (Nth landmark assumed to belong to the Nth entry) and broke
+    entirely on a third-party profile, which has no edit affordance at all —
+    school always came back null. Fixed by reading the school name the same
+    place the degree already came from: a bare school-name text token sits
+    immediately before the degree line in BOTH self- and third-party views
+    (confirmed live on both), so walking backward from the date range two
+    meaningful tokens instead of one gets degree and school together,
+    correctly scoped to that specific entry.
+
+    Also accepts a bare "YYYY – YYYY" date range (no month) alongside the
+    original "MMM YYYY – MMM YYYY" — found live on a third-party profile's
+    secondary-school entry. Never raises.
     """
     if not raw_text:
         return []
@@ -501,50 +559,58 @@ def parse_education_from_flight(raw_text: str | None) -> list[Education]:
     except Exception:
         return []
 
-    schools: list[str] = []
-    for tok in tokens:
-        match = _EDU_EDIT_PREFIX_RE.match(tok)
-        if match:
-            schools.append(match.group(1))
-
     entries: list[dict] = []
     for i, tok in enumerate(tokens):
         date_match = _EDU_DATE_RANGE_RE.match(tok)
         if not date_match:
             continue
-        prev = _find_prev_meaningful(tokens, i - 1)
-        degree = prev if prev is not None and not _EDU_DATE_RANGE_RE.match(prev) else None
+        nearby: list[str] = []
+        k = i - 1
+        steps = 0
+        while k >= 0 and steps < 12 and len(nearby) < 2:
+            if not _is_noise_token(tokens[k]):
+                nearby.append(tokens[k])
+            k -= 1
+            steps += 1
+        degree = nearby[0] if len(nearby) >= 1 and not _EDU_DATE_RANGE_RE.match(nearby[0]) else None
+        school = nearby[1] if len(nearby) >= 2 and not _EDU_DATE_RANGE_RE.match(nearby[1]) else None
         entries.append(
             {
+                "school": school,
                 "degree": degree,
                 "start": date_match.group(1),
                 "end": None if date_match.group(2) == "Present" else date_match.group(2),
             }
         )
 
-    education = []
-    for idx, entry in enumerate(entries):
-        education.append(
-            Education(
-                school=schools[idx] if idx < len(schools) else None,
-                degree=entry["degree"],
-                field_of_study=None,
-                date_range=DateRange(start=entry["start"], end=entry["end"]),
-                description=None,
-            )
+    return [
+        Education(
+            school=entry["school"],
+            degree=entry["degree"],
+            field_of_study=None,
+            date_range=DateRange(start=entry["start"], end=entry["end"]),
+            description=None,
         )
-    return education
+        for entry in entries
+    ]
 
 
 _SKILL_EDIT_PREFIX_RE = re.compile(r"^Edit (.+) skill$")
+# Third-party profiles have no "Edit <Name> skill" landmark at all — you
+# can't edit someone else's skills — but show an "Endorse <Name>" button per
+# skill instead (which self-view doesn't, since you can't endorse yourself).
+# Same self-view-only-landmark issue Experience and Education both had.
+_SKILL_ENDORSE_PREFIX_RE = re.compile(r"^Endorse (.+)$")
 
 
 def parse_skills_from_flight(raw_text: str | None) -> list[Skill]:
     """Experimental — see README. Same SDUI "pagination" protocol as
     education. Skill names come reliably from "Edit <Name> skill" edit-form
-    landmark text, deduped in order. Note: this only covers one page of
-    results (LinkedIn paginates skills 10 at a time; only the first page is
-    fetched — see README known limitations). Never raises."""
+    landmark text on self-view, or "Endorse <Name>" button text on a
+    third-party profile (confirmed live — see `_SKILL_ENDORSE_PREFIX_RE`),
+    deduped in order. Note: this only covers one page of results (LinkedIn
+    paginates skills 10 at a time; only the first page is fetched — see
+    README known limitations). Never raises."""
     if not raw_text:
         return []
 
@@ -556,13 +622,16 @@ def parse_skills_from_flight(raw_text: str | None) -> list[Skill]:
     skills: list[Skill] = []
     seen: set[str] = set()
     for tok in tokens:
-        match = _SKILL_EDIT_PREFIX_RE.match(tok)
+        match = _SKILL_EDIT_PREFIX_RE.match(tok) or _SKILL_ENDORSE_PREFIX_RE.match(tok)
         if match:
             name = match.group(1)
             if name not in seen:
                 skills.append(Skill(name=name))
                 seen.add(name)
     return skills
+
+
+_ABOUT_CLUSTER_GAP = 15
 
 
 def parse_about_from_flight(raw_text: str | None) -> str | None:
@@ -573,10 +642,22 @@ def parse_about_from_flight(raw_text: str | None) -> str | None:
     Deliberately does NOT look near the literal "About" heading token — it
     turns out to be nowhere near the actual paragraph in the flattened text
     stream (they only *appeared* adjacent in an earlier hand-inspection that
-    was looking at a deduplicated view). Instead scans the whole stream for a
-    long, prose-like string: distinctive enough in practice since Analytics/
-    Featured/Services in this same response are short labels or empty, not
-    prose, making the About paragraph the only match. Never raises."""
+    was looking at a deduplicated view). Instead scans the whole stream for
+    long, prose-like strings.
+
+    A multi-paragraph About renders as several separate text tokens, not
+    one — confirmed live on a profile whose About had 5 paragraphs; a plain
+    "longest single token" pick returned only one paragraph, silently
+    dropping the rest. Fix: cluster candidate tokens by how close together
+    they sit in the stream (each About paragraph's tokens land within
+    `_ABOUT_CLUSTER_GAP` positions of each other, separated by a handful of
+    markup-only tokens; unrelated candidates — e.g. a "Highlights" mutual-
+    education blurb, a skills summary line — sit much farther from any other
+    candidate) and return the cluster with the most total text, joined in
+    order. A single-paragraph About is just a cluster of one, so this
+    subsumes the original behavior. Still a heuristic, not a real field, and
+    verified against only two profiles — see README known limitations.
+    Never raises."""
     if not raw_text:
         return None
 
@@ -585,15 +666,28 @@ def parse_about_from_flight(raw_text: str | None) -> str | None:
     except Exception:
         return None
 
-    for tok in tokens:
+    candidates = [
+        (i, tok)
+        for i, tok in enumerate(tokens)
         if (
             len(tok) > 60
             and " " in tok
             and not _is_noise_token(tok)
             and not tok.startswith(("http", "com.linkedin", "proto."))
-        ):
-            return tok
-    return None
+        )
+    ]
+    if not candidates:
+        return None
+
+    clusters: list[list[tuple[int, str]]] = [[candidates[0]]]
+    for idx, tok in candidates[1:]:
+        if idx - clusters[-1][-1][0] <= _ABOUT_CLUSTER_GAP:
+            clusters[-1].append((idx, tok))
+        else:
+            clusters.append([(idx, tok)])
+
+    best = max(clusters, key=lambda c: sum(len(t) for _, t in c))
+    return " ".join(tok for _, tok in best)
 
 
 def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:

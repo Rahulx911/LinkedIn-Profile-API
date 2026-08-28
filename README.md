@@ -160,10 +160,14 @@ POST /flagship-web/rsc-action/actions/pagination
 
 Its Flight response is the simplest of the three: skill names come reliably
 from `"Edit <Name> skill"` edit-form landmark text, no date ranges or
-company/location disambiguation needed. One real gap: LinkedIn paginates
-skills 10 at a time (`start`/`count` in the request body), and only the first
-page is currently fetched — a profile with more than 10 skills will be
-missing the rest (see "Known limitations").
+company/location disambiguation needed — on self-view. A fourth profile's
+test (see below) found this landmark doesn't exist at all on third-party
+profiles (same self-view-only-landmark issue Experience and Education both
+had), which show an `"Endorse <Name>"` button per skill instead; both are now
+handled. One real gap: LinkedIn paginates skills 10 at a time (`start`/`count`
+in the request body), and only the first page is currently fetched — a
+profile with more than 10 skills will be missing the rest (see "Known
+limitations").
 
 With this, every core field the assignment asked for is populated with real
 data.
@@ -234,6 +238,67 @@ data stream despite being third on the page — even though each role's own
 fields (title/company/dates/location/description) are still correctly
 grouped together. Given clients would reasonably sort by date anyway, this
 wasn't treated as worth chasing further; see "Known limitations."
+
+**A fourth profile validated About/Location and surfaced four more real bugs,
+all fixed.** Testing end-to-end against a fourth profile confirmed the About
+and Location extraction added later (see below) generalizes beyond the one
+profile each was built against, but also caught real regressions no earlier
+capture had exercised:
+
+- **About** returned only one paragraph of a five-paragraph About section —
+  each paragraph is its own separate text token in the stream, and the
+  original "longest single token" pick just grabbed one. Fixed by clustering
+  candidate tokens by how close together they sit in the stream (each
+  paragraph's tokens land close to each other; unrelated candidates —
+  e.g. a "Highlights" mutual-education blurb — sit much farther away) and
+  joining the richest cluster.
+- **Location** returned a mutual-connections widget's "· 2nd" connection-
+  degree badge instead of the real location — that badge happens to match
+  the exact same `<p>·</p><div><p>` shape the location regex looks for, and
+  sits earlier in the page than the real top card. Fixed by requiring real
+  text before the "·" in the first `<p>` (degree badges are bare "· 1st"/
+  "· 2nd", nothing before the bullet).
+- **Education's school name always came back `null` on third-party
+  profiles** — it was sourced from an `"Edit education <School>"` edit-form
+  landmark, a self-view-only affordance (same category of self-view
+  assumption Experience's title extraction already had to fix). On this
+  profile there's no such landmark at all; the school renders as bare text
+  instead, in the same position self-view *also* has it (immediately before
+  the degree line) — the edit-landmark list was never actually necessary.
+  Fixed by reading the school the same way the degree already was: walking
+  backward from the date range one extra meaningful token. Also extended the
+  date-range pattern to accept a bare `"YYYY – YYYY"` school year (no month),
+  found on this profile's secondary-school entry.
+- **Experience title/company assignment broke on a profile with *multiple*
+  grouped multi-role companies.** The self-view Delhivery capture that
+  originally validated multi-role grouping happened to have each sub-role
+  show its own employment type inline, which is what let the title-detection
+  heuristic recognize an inline title at all. This profile has two grouped
+  companies where every sub-role shares one employment type instead — shown
+  once in an aggregate line (`"Full-time · 1 yr 8 mos"`) instead of per role
+  — so titles fell through to the edit-landmark fallback and, since one role
+  has no landmark at all and two share identical landmark text, every
+  subsequent title/company/location shifted onto the wrong role. Fixed by
+  recognizing a bare title directly followed by its own date range (no
+  employment-type marker in between) as a title too, in both the outer
+  role-detection loop and the inner description-collection lookahead (which
+  otherwise swallowed the next role's title into the current role's
+  description). Also extended the duration-badge pattern to match the
+  combined `"1 yr 8 mos"` form the aggregate line and one grouped company's
+  own duration badge both used, alongside the single-unit `"8 mos"` form an
+  earlier profile happened to show.
+- **Skills came back completely empty** — the same self-view-only-landmark
+  issue as Education's school name, just not yet found there. Skill names
+  came only from an `"Edit <Name> skill"` edit-form landmark, which doesn't
+  exist on a profile you don't own. Fixed by also recognizing the
+  `"Endorse <Name>"` button label third-party profiles show per skill
+  instead (you can endorse someone else's skills but not your own, and
+  vice versa for editing) — the two are mutually exclusive per profile, so
+  checking for either landmark works for both views.
+
+All fixes were re-verified against every existing fixture (no regressions)
+plus this profile's real captured data, matching the page exactly across all
+7 experience entries, all 3 education entries, and the first page of skills.
 
 ## Architecture
 
@@ -360,6 +425,7 @@ Error responses share one shape (`{"error": "...", "detail": "..."}`):
 | 403 | Profile private / out of network / account restricted |
 | 404 | Profile doesn't exist |
 | 429 | LinkedIn is rate-limiting this account |
+| 502 | Request to LinkedIn timed out/failed at the network level, or LinkedIn returned an unexpected status |
 
 ### `GET /healthz`
 
@@ -382,13 +448,16 @@ Liveness check for deployment platforms.
   Education/Skills). Any of them could break if LinkedIn changes this internal
   format; every fetch is wrapped so a failure never takes down the rest of the
   response (that section just comes back empty). Field accuracy is
-  best-effort, verified only against the layouts actually captured:
-  Experience's title-matching and description extraction are heuristics tuned
-  against a multi-role-same-company + two single-role-company layout (career
-  breaks, self-employment, very long histories untested); Education's parser
-  is simpler and more regular but was only verified against a
-  university-plus-two-schools layout; Skills' parser is the most reliable of
-  the three (a single reliable text landmark, no date/location disambiguation).
+  best-effort, verified only against the layouts actually captured across
+  four real profiles: Experience's title-matching and description extraction
+  are heuristics tuned against self-view and third-party layouts, single- and
+  multi-role companies, and grouped multi-role companies both with per-role
+  and shared employment types (career breaks, self-employment, very long
+  histories untested); Education's parser handles both self-view and
+  third-party school-name rendering and both `"MMM YYYY"` and bare-year date
+  ranges; Skills' parser is the simplest of the three (no date/location
+  disambiguation) and now handles both self-view's "Edit" landmark and
+  third-party's "Endorse" button, tested on two profiles.
 - **Skills only returns the first page (10).** LinkedIn paginates skills via
   `start`/`count` in the request body; only `start=0` is fetched, so a profile
   with more than 10 skills will be missing the rest. Extending this to loop
@@ -398,23 +467,23 @@ Liveness check for deployment platforms.
   supply the profile's encoded id, which both their requests require. A
   profile with no content in `projects`/other bonus sections won't surface
   this, in which case both come back empty even if the data exists —
-  confirmed live on two of the three profiles tested during development.
+  confirmed live on two of the four profiles tested during development.
 - **Experience entries aren't guaranteed to be in page-display order.**
   Confirmed live on a third-party profile where one role appeared first in
   the parsed output despite being third on the actual page. Each role's own
   fields are still correctly grouped together — only the ordering between
   roles can differ from what's visually shown.
-- **`about` and `location` are heuristic, verified on only one profile.**
-  `about` returns the first sufficiently long (>60 char) prose-like string in
-  the `above_activity` Flight response — not anchored to the About section
-  itself, so a profile with other long prose (e.g. a Featured post caption)
-  ahead of it in the stream could return the wrong text. `location` matches a
-  specific positional adjacency in the page HTML (the `<p>` immediately after
-  the top card's "`<Company> · <School>`" line) — a profile with no current
-  company/school shown there won't match, and location comes back `null`.
-  Both are covered by real-fixture tests (see `tests/test_parser.py`) but only
-  against one captured profile; unlike Experience, they weren't re-verified
-  against the two third-party profiles used elsewhere in this project.
+- **`about` and `location` are still heuristic**, though both are now
+  verified against two profiles each (see "How this was reverse engineered").
+  `about` clusters long prose-like tokens by proximity and returns the
+  richest cluster — not anchored to the About section itself, so a profile
+  with an unrelated large cluster of prose elsewhere in the same response
+  (e.g. several long Featured post captions close together) could still
+  return the wrong text. `location` matches a specific positional adjacency
+  in the page HTML (the `<p>` immediately after the top card's
+  "`<Company> · <School>`" line, with real text required before the "·") — a
+  profile with no current company/school shown there won't match, and
+  location comes back `null`.
 - **`headline` and `profile_images` aren't guaranteed for every profile.**
   Both come from a `MiniProfile` entity that appears as a side effect in some
   subresource responses (e.g. `projects`) — a profile with none of those

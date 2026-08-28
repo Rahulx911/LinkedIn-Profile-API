@@ -13,6 +13,7 @@ from app.linkedin.exceptions import (
     ProfileNotAccessibleError,
     ProfileNotFoundError,
     RateLimitedError,
+    UpstreamError,
 )
 from app.linkedin.parser import parse_profile
 from app.models import ErrorResponse, ProfileRequest, ProfileResponse
@@ -36,6 +37,10 @@ EXCEPTION_STATUS = {
     ProfileNotAccessibleError: 403,
     AuthenticationError: 401,
     RateLimitedError: 429,
+    # Transport-level failure (timeout, connection error) or an unexpected
+    # response from LinkedIn we don't have a specific mapping for — 502 since
+    # it's this API's upstream (LinkedIn), not the client's request, at fault.
+    UpstreamError: 502,
 }
 
 

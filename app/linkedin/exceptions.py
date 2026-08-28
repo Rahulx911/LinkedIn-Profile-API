@@ -21,3 +21,11 @@ class AuthenticationError(LinkedInClientError):
 
 class RateLimitedError(LinkedInClientError):
     """LinkedIn returned 429, or is throttling this account."""
+
+
+class UpstreamError(LinkedInClientError):
+    """The request to LinkedIn failed at the transport level (timeout,
+    connection error), LinkedIn returned an unexpected non-success status we
+    don't have a specific mapping for, or its response body wasn't valid
+    JSON where JSON was expected. Distinct from the auth/rate/not-found
+    errors above, which reflect a real, understood response from LinkedIn."""

@@ -18,10 +18,25 @@ EXPERIENCE_FLIGHT_THIRDPARTY_FIXTURE = (
 EXPERIENCE_FLIGHT_THIRDPARTY2_FIXTURE = (
     Path(__file__).parent / "fixtures" / "experience_flight_thirdparty2_sample.txt"
 )
+EXPERIENCE_FLIGHT_THIRDPARTY3_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "experience_flight_thirdparty3_sample.txt"
+)
 EDUCATION_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "education_flight_sample.txt"
+EDUCATION_FLIGHT_THIRDPARTY_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "education_flight_thirdparty_sample.txt"
+)
 SKILLS_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "skills_flight_sample.txt"
+SKILLS_FLIGHT_THIRDPARTY_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "skills_flight_thirdparty_sample.txt"
+)
 ABOUT_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "about_flight_sample.txt"
+ABOUT_FLIGHT_THIRDPARTY_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "about_flight_thirdparty_sample.txt"
+)
 PROFILE_HTML_FIXTURE = Path(__file__).parent / "fixtures" / "profile_html_sample.html"
+PROFILE_HTML_THIRDPARTY_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "profile_html_thirdparty_sample.html"
+)
 
 
 def load_fixture() -> dict:
@@ -123,6 +138,32 @@ def test_parses_skills_from_real_captured_flight_response():
     ]
 
 
+def test_parses_skills_from_real_thirdparty_profile():
+    # Real response captured live from a different person's profile.
+    # Previously (see git history), skill names came only from a self-view
+    # -only "Edit <Name> skill" edit-form landmark and always came back empty
+    # on third-party profiles — same category of bug already fixed for
+    # Experience and Education. Third-party profiles show an "Endorse <Name>"
+    # button per skill instead (you can endorse others' skills but not your
+    # own, and vice versa for editing).
+    text = SKILLS_FLIGHT_THIRDPARTY_FIXTURE.read_text()
+    skills = parse_skills_from_flight(text)
+
+    names = [s.name for s in skills]
+    assert names == [
+        "Apache Kafka",
+        "Test Automation",
+        "Jenkins",
+        "Kubernetes",
+        "AngularJS",
+        "Team Management",
+        "Strategic Communications",
+        "Event Management",
+        "Brand Strategy",
+        "Presentation Skills",
+    ]
+
+
 def test_skills_parser_never_raises_on_garbage_input():
     assert parse_skills_from_flight("not a real flight response") == []
     assert parse_skills_from_flight("") == []
@@ -153,6 +194,36 @@ def test_parses_education_from_real_captured_flight_response():
     assert school.degree == "10th, Isce"
     assert school.date_range.start == "Jul 2007"
     assert school.date_range.end == "Mar 2019"
+
+
+def test_parses_education_from_real_thirdparty_profile():
+    # Real response captured live from a different person's profile (not the
+    # account whose cookie made the request). Previously (see git history),
+    # school name came from a self-view-only "Edit education <School>"
+    # landmark and always came back null on third-party profiles; also
+    # exercises a bare "YYYY - YYYY" date range (no month), which the
+    # self-view fixture never has.
+    text = EDUCATION_FLIGHT_THIRDPARTY_FIXTURE.read_text()
+    education = parse_education_from_flight(text)
+
+    assert len(education) == 3
+
+    higher_secondary, high_school, university = education
+
+    assert higher_secondary.school == "HOLY CHILD SR SEC SCHOOL"
+    assert higher_secondary.degree == "Higher Secondary, CBSE (PCM with IP)"
+    assert higher_secondary.date_range.start == "2019"
+    assert higher_secondary.date_range.end == "2021"
+
+    assert high_school.school == "HOLY CHILD SR SEC SCHOOL"
+    assert high_school.degree == "High school, Cbse"
+    assert high_school.date_range.start == "2017"
+    assert high_school.date_range.end == "2019"
+
+    assert university.school == "Vellore Institute of Technology"
+    assert university.degree == "Bachelor of Technology - BTech, Information Technology"
+    assert university.date_range.start == "Sep 2021"
+    assert university.date_range.end == "Sep 2025"
 
 
 def test_education_parser_never_raises_on_garbage_input():
@@ -276,6 +347,73 @@ def test_parses_experience_from_real_thirdparty_profile_with_attachments():
     assert "Developed self-driving car software" in mercedes.description
 
 
+def test_parses_experience_with_grouped_multirole_companies_sharing_one_type():
+    # Real response captured live from a fourth profile — has TWO grouped
+    # multi-role companies (JPMorganChase: 2 roles, Student Technical
+    # Community: 2 roles) where every sub-role under the group shares the
+    # SAME employment type, so LinkedIn shows it once in an aggregate summary
+    # line ("Full-time · 1 yr 8 mos") instead of per role. Previously (see
+    # git history) this broke two different ways: (1) a bare title directly
+    # followed by its own date range (no per-role employment-type marker)
+    # wasn't recognized as a title at all, so titles/companies/locations
+    # shifted onto the wrong roles via the edit-landmark fallback; (2) the
+    # combined "1 yr 8 mos" duration format wasn't matched by the
+    # duration-badge regex (only single-unit forms like "8 mos" were), so the
+    # grouped company's own name was never recognized as a company at all,
+    # leaking the previous role's company into these instead.
+    text = EXPERIENCE_FLIGHT_THIRDPARTY3_FIXTURE.read_text()
+    experiences = parse_experience_from_flight(text)
+
+    assert len(experiences) == 7
+
+    (
+        eng1,
+        intern1,
+        sponsorship,
+        intern2,
+        senior_core,
+        junior_core,
+        designer,
+    ) = experiences
+
+    assert eng1.title == "Software Engineer -1"
+    assert eng1.company == "JPMorganChase"
+    assert eng1.location == "Bengaluru, Karnataka, India · On-site"
+    assert eng1.date_range.start == "Jul 2025"
+    assert eng1.date_range.end is None
+
+    assert intern1.title == "Software Engineer Intern"
+    assert intern1.company == "JPMorganChase"
+    assert intern1.date_range.start == "Jan 2025"
+    assert intern1.date_range.end == "Jun 2025"
+    assert intern1.description == "- CIB"
+
+    assert sponsorship.title == "Head of Sponsorship"
+    assert sponsorship.company == "graVITas VIT Vellore"
+    assert sponsorship.location == "Vellore, Tamil Nadu, India"
+
+    assert intern2.title == "Software Engineer Intern"
+    assert intern2.company == "JPMorganChase"
+    assert intern2.location == "Banglore · On-site"
+    assert intern2.date_range.start == "Jun 2024"
+    assert intern2.date_range.end == "Aug 2024"
+
+    assert senior_core.title == "Senior core member"
+    assert senior_core.company == "Student Technical Community — VIT Vellore"
+    assert senior_core.date_range.start == "Oct 2022"
+    assert senior_core.date_range.end == "Jun 2023"
+
+    assert junior_core.title == "Junior core member"
+    assert junior_core.company == "Student Technical Community — VIT Vellore"
+    assert junior_core.date_range.start == "Dec 2021"
+    assert junior_core.date_range.end == "Oct 2022"
+
+    assert designer.title == "UI/UX Designer"
+    assert designer.company == "Makoons Play School"
+    assert designer.date_range.start == "Feb 2023"
+    assert designer.date_range.end == "Mar 2023"
+
+
 def test_experience_parser_never_raises_on_garbage_input():
     assert parse_experience_from_flight("not a real flight response") == []
     assert parse_experience_from_flight("") == []
@@ -336,3 +474,41 @@ def test_extracts_location_from_real_captured_html():
 def test_location_parser_never_raises_on_garbage_input():
     assert _extract_location_from_html("not real html") is None
     assert _extract_location_from_html("") is None
+
+
+def test_parses_multi_paragraph_about_from_real_thirdparty_profile():
+    # Real response captured live from a different person's profile — this
+    # About has 5 separate paragraphs, each its own text token in the Flight
+    # stream. Previously (see git history), picking a single "longest token"
+    # returned only one paragraph, silently dropping the rest.
+    text = ABOUT_FLIGHT_THIRDPARTY_FIXTURE.read_text()
+    about = parse_about_from_flight(text)
+
+    assert about == (
+        "As a passionate coder and problem solver, I thrive on finding "
+        "creative solutions to real-world challenges. With a keen eye for "
+        "UI/UX design, I bring a unique blend of technical expertise and "
+        "design sensibility to my work. I am an enthusiastic designer who "
+        "enjoys creating user-centered and visually appealing experiences. "
+        "In addition to my design skills, I am also proficient in backend "
+        "web development. I have a strong command of programming languages, "
+        "frameworks, and databases that allow me to build robust and "
+        "scalable web applications. I actively participate in hackathons "
+        "and stay updated with the latest advancements in the field of "
+        "technology. My drive to constantly improve and my ability to work "
+        "collaboratively make me a valuable asset to any project. Let's "
+        "connect and collaborate to create meaningful and impactful "
+        "solutions!"
+    )
+
+
+def test_extracts_location_skipping_connection_degree_badge_false_positive():
+    # Real page HTML excerpt captured live from a different person's profile
+    # — a mutual-connections widget's "· 1st"/"· 2nd" degree badge matches
+    # the same <p>·</p><div><p> shape as the real top card and sits earlier
+    # in the page. Previously (see git history), a bare `[^<]*·` matched
+    # that badge first and returned "· 2nd" as the location instead of the
+    # real "India" further down the page.
+    html = PROFILE_HTML_THIRDPARTY_FIXTURE.read_text()
+
+    assert _extract_location_from_html(html) == "India"

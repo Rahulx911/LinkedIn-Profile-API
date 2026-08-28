@@ -32,6 +32,7 @@ version, confirmed live against a real account:
 """
 
 import base64
+import json
 import os
 import re
 
@@ -42,6 +43,7 @@ from app.linkedin.exceptions import (
     ProfileNotAccessibleError,
     ProfileNotFoundError,
     RateLimitedError,
+    UpstreamError,
 )
 
 # Confirmed alive via live probing (see scripts/probe_endpoints.py). Two of
@@ -229,6 +231,16 @@ class VoyagerClient:
     def close(self) -> None:
         self._client.close()
 
+    def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Thin wrapper around every outgoing call so a transport-level
+        failure (timeout, DNS/connection error — LinkedIn never even sent a
+        response) raises our own error type instead of a raw httpx exception
+        propagating all the way up to FastAPI's generic 500 handler."""
+        try:
+            return self._client.request(method, url, **kwargs)
+        except httpx.RequestError as exc:
+            raise UpstreamError(f"Request to LinkedIn failed ({type(exc).__name__}): {exc}") from exc
+
     def _check_auth_response(self, response: httpx.Response, public_identifier: str) -> None:
         if response.status_code == 401:
             raise AuthenticationError("LinkedIn rejected the session cookie (401).")
@@ -244,10 +256,14 @@ class VoyagerClient:
             )
         if response.status_code == 429:
             raise RateLimitedError("LinkedIn is rate-limiting this account (429).")
-        response.raise_for_status()
+        if response.status_code >= 400:
+            raise UpstreamError(
+                f"LinkedIn returned an unexpected {response.status_code} for "
+                f"'{public_identifier}'."
+            )
 
     def fetch_profile_html(self, public_identifier: str) -> str:
-        response = self._client.get(f"/in/{public_identifier}/")
+        response = self._request("GET", f"/in/{public_identifier}/")
         if response.status_code in (401, 403, 404):
             self._check_auth_response(response, public_identifier)
         if "authwall" in str(response.url) or "/login" in str(response.url):
@@ -255,7 +271,7 @@ class VoyagerClient:
                 "LinkedIn redirected to a login/authwall page — the li_at "
                 "cookie is missing, expired, or the account hit a checkpoint."
             )
-        response.raise_for_status()
+        self._check_auth_response(response, public_identifier)
         return response.text
 
     def resolve_urn(self, public_identifier: str) -> str:
@@ -274,12 +290,21 @@ class VoyagerClient:
         """Returns None if this specific subresource is unavailable (404/410)
         — that's expected for some sections on some profiles, and for
         positions/educations/skills on every profile (see module docstring).
-        Real errors (401/403/429) still raise."""
-        response = self._client.get(f"/voyager/api/identity/profiles/{public_identifier}/{resource}")
+        Real errors (401/403/429) still raise; a non-JSON body on an
+        otherwise-successful response raises UpstreamError rather than
+        letting a raw JSONDecodeError escape."""
+        response = self._request(
+            "GET", f"/voyager/api/identity/profiles/{public_identifier}/{resource}"
+        )
         if response.status_code in (404, 410):
             return None
         self._check_auth_response(response, public_identifier)
-        return response.json()
+        try:
+            return response.json()
+        except json.JSONDecodeError as exc:
+            raise UpstreamError(
+                f"LinkedIn returned a non-JSON body for '{resource}' on '{public_identifier}'."
+            ) from exc
 
     def fetch_sdui_component_raw(self, public_identifier: str, component_key: str) -> str:
         """Experimental — see module docstring and README. Returns the raw
@@ -301,7 +326,7 @@ class VoyagerClient:
             "referer": f"https://www.linkedin.com/in/{public_identifier}/",
         }
         body = _SDUI_COMPONENT_BODY_TEMPLATE.format(v=public_identifier)
-        response = self._client.post(url, content=body, headers=headers)
+        response = self._request("POST", url, content=body, headers=headers)
         self._check_auth_response(response, public_identifier)
         return response.text
 
@@ -327,7 +352,7 @@ class VoyagerClient:
             "referer": f"https://www.linkedin.com/in/{public_identifier}/details/education/",
         }
         body = _SDUI_EDUCATION_PAGINATION_BODY_TEMPLATE.format(v=public_identifier, p=profile_id)
-        response = self._client.post(url, content=body, headers=headers)
+        response = self._request("POST", url, content=body, headers=headers)
         self._check_auth_response(response, public_identifier)
         return response.text
 
@@ -349,7 +374,7 @@ class VoyagerClient:
             "referer": f"https://www.linkedin.com/in/{public_identifier}/details/skills/",
         }
         body = _SDUI_SKILLS_PAGINATION_BODY_TEMPLATE.format(v=public_identifier, p=profile_id)
-        response = self._client.post(url, content=body, headers=headers)
+        response = self._request("POST", url, content=body, headers=headers)
         self._check_auth_response(response, public_identifier)
         return response.text
 
