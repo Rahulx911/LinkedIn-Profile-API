@@ -35,6 +35,7 @@ import base64
 import json
 import os
 import re
+import sys
 
 import httpx
 
@@ -258,6 +259,18 @@ class VoyagerClient:
             raise UpstreamError(f"Request to LinkedIn failed ({type(exc).__name__}): {exc}") from exc
 
     def _check_auth_response(self, response: httpx.Response, public_identifier: str) -> None:
+        if response.status_code >= 400:
+            # Logged so a deployment's own logs (e.g. Render) show LinkedIn's
+            # actual response body on a block/denial — the status code alone
+            # (401/403/999) doesn't say whether it's a plain auth rejection,
+            # an IP/location-based restriction, or a checkpoint challenge
+            # page, and those need different fixes. Never logs request
+            # headers or cookies, only what LinkedIn sent back.
+            print(
+                f"LinkedIn response for '{public_identifier}': "
+                f"status={response.status_code} body={response.text[:1000]!r}",
+                file=sys.stderr,
+            )
         if response.status_code == 401:
             raise AuthenticationError("LinkedIn rejected the session cookie (401).")
         if response.status_code == 403:
