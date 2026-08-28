@@ -421,6 +421,21 @@ def test_parses_experience_with_grouped_multirole_companies_sharing_one_type():
     assert designer.company == "Makoons Play School"
     assert designer.date_range.start == "Feb 2023"
     assert designer.date_range.end == "Mar 2023"
+    # Bare country-only location ("India" — no comma, no On-site/Remote/
+    # Hybrid suffix). Previously (see git history) unrecognized by
+    # _is_location_token, so it came back null; worse, the literal word
+    # leaked into the description as noise ("India\nI worked on..."). Fixed
+    # by matching against an explicit country list.
+    assert designer.location == "India"
+    assert designer.description == (
+        "I worked on this project to create a web app and website for Makoons "
+        "Preschool. The focus was on designing a colorful and engaging user "
+        "interface that would appeal to children. The outcome was a visually "
+        "appealing web app and website with a vibrant color palette, "
+        "interactive elements, and user-friendly navigation, providing an "
+        "immersive experience for young children while effectively "
+        "showcasing the preschool's offerings."
+    )
 
 
 def test_parses_experience_with_title_and_company_but_no_employment_type():

@@ -392,6 +392,38 @@ is a stray skill-tag string that happens to sit adjacent. Documented as an
 extension of the existing "stream order doesn't always match display order"
 limitation.
 
+**A full re-test across all six profiles, plus the first test through the
+actual HTTP layer (not just the parser functions directly), caught two more
+real issues.** Re-running every profile end-to-end surfaced a location bug
+the per-profile testing had missed: `current_location` was reset to `None`
+when a new company started via the bare-company-plus-duration rule, but NOT
+when a new single-role company started via a combined `"Company · Type"`
+line — so a company with no location of its own (confirmed live: Tech
+Mahindra, right after a JPMorganChase role that did have one) silently
+inherited the previous, unrelated company's location instead of coming back
+`null`. Fixed by resetting it in both places.
+
+Testing through a locally running instance of the actual FastAPI app via
+curl (rather than calling the parser directly) — the first time this project
+validated the real HTTP surface, not just the parsing logic — turned up a
+second, smaller gap: a request body missing the required `url` field returns
+FastAPI's own built-in validation error shape (`{"detail": [...]}`), which
+doesn't match this API's own `{"error": ..., "detail": ...}` contract used
+for every other error case. Worth documenting, not worth suppressing
+FastAPI's own validation to force a match.
+
+That same curl round, against a real profile, surfaced one more: a bare
+country-only location with no city/state and no On-site/Remote/Hybrid suffix
+(just the word `"India"`) wasn't recognized by `_is_location_token` at all —
+neither existing pattern requires a comma or suffix that a lone country name
+doesn't have. Worse, the literal word was leaking into that role's
+description as noise instead. Fixed by matching against an explicit country
+list (deliberately not a shape-based guess like "any short capitalized
+word after a date" — that would risk mistaking a real description's first
+word for a location, with no comma or suffix to disambiguate). Fixing this
+also incidentally cleaned up the description leak, since the token is now
+correctly claimed as `location` instead of falling through as noise.
+
 ## Architecture
 
 ```
@@ -508,7 +540,8 @@ Response `200` (see `app/models.py` for the full schema):
 }
 ```
 
-Error responses share one shape (`{"error": "...", "detail": "..."}`):
+Error responses from this API's own logic share one shape
+(`{"error": "...", "detail": "..."}`):
 
 | Status | Cause |
 |---|---|
@@ -518,6 +551,12 @@ Error responses share one shape (`{"error": "...", "detail": "..."}`):
 | 404 | Profile doesn't exist |
 | 429 | LinkedIn is rate-limiting this account |
 | 502 | Request to LinkedIn timed out/failed at the network level, or LinkedIn returned an unexpected status |
+
+One exception: `422` (malformed request body — e.g. missing the `url`
+field) is FastAPI's own built-in request-validation response, shaped
+differently (`{"detail": [{"type": ..., "loc": ..., "msg": ..., ...}]}`) —
+confirmed via a direct curl against the running app. Not worth overriding
+FastAPI's own validation just to force a shape match.
 
 ### `GET /healthz`
 
@@ -565,6 +604,12 @@ Liveness check for deployment platforms.
   `start`/`count` in the request body; only `start=0` is fetched, so a profile
   with more than 10 skills will be missing the rest. Extending this to loop
   until an empty page would be a small, mechanical follow-up.
+- **`/certifications` likely paginates too, and silently returns a partial
+  list with no indication more exist.** Confirmed live on a profile with 12
+  real certifications where only 6 came back — unlike Skills, this endpoint's
+  pagination mechanism (whether it even accepts `start`/`count`, and under
+  what parameter names) hasn't been reverse-engineered, so this is
+  documented rather than guessed at.
 - **Education and Skills additionally depend on a MiniProfile entity being
   available** (same opportunistic source as headline/photo — see below) to
   supply the profile's encoded id, which both their requests require. A
