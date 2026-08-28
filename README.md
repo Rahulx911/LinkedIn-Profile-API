@@ -406,11 +406,12 @@ inherited the previous, unrelated company's location instead of coming back
 Testing through a locally running instance of the actual FastAPI app via
 curl (rather than calling the parser directly) — the first time this project
 validated the real HTTP surface, not just the parsing logic — turned up a
-second, smaller gap: a request body missing the required `url` field returns
-FastAPI's own built-in validation error shape (`{"detail": [...]}`), which
-doesn't match this API's own `{"error": ..., "detail": ...}` contract used
-for every other error case. Worth documenting, not worth suppressing
-FastAPI's own validation to force a match.
+second, smaller gap: a request body missing the required `url` field
+triggered FastAPI's own built-in validation error shape (`{"detail": [...]}`),
+which didn't match this API's own `{"error": ..., "detail": ...}` contract
+used for every other error case. Fixed with a dedicated
+`RequestValidationError` handler in `main.py` that reformats it to match —
+see the API docs above.
 
 That same curl round, against a real profile, surfaced one more: a bare
 country-only location with no city/state and no On-site/Remote/Hybrid suffix
@@ -476,6 +477,7 @@ python scripts/inspect_raw.py <public_identifier>
 
 Other diagnostic scripts used during development, kept for reference:
 - `scripts/probe_endpoints.py <id>` — checks which per-section endpoints are alive
+- `scripts/probe_certifications_pagination.py <id>` — checks whether `/certifications` respects `start`/`count` query params (confirmed: it doesn't — see "Known limitations")
 - `scripts/inspect_html.py <id> "<phrase>"` — checks whether a phrase from the profile is server-rendered into the page HTML
 - `scripts/inspect_sdui.py <id> [experience|education|skills]` — tests the experimental SDUI "component" action directly
 - `scripts/inspect_education.py <id> <profile_id>` / `scripts/inspect_skills.py <id> <profile_id>` — test the experimental SDUI "pagination" action for each section
@@ -488,6 +490,32 @@ Run tests (these use a synthetic fixture, not live LinkedIn calls):
 ```bash
 pytest
 ```
+
+## Deployment
+
+Live at: **TODO — add the Render URL once deployed**
+
+Deployed on [Render](https://render.com) as a Docker web service, built directly
+from the `Dockerfile` in this repo:
+
+1. Create a Render account and connect this GitHub repository.
+2. Create a new **Web Service**, pointing at this repo — Render detects the
+   `Dockerfile` automatically and needs no build/start command overrides.
+3. Set `LI_AT_COOKIE` and `JSESSIONID` as **secret environment variables** in
+   Render's dashboard (Environment tab) — never committed to the repo.
+   `PROFILE_CACHE_TTL_SECONDS` / `LINKEDIN_REQUEST_TIMEOUT_SECONDS` are
+   optional overrides of the defaults in `app/config.py`.
+4. Deploy. Render injects its own `PORT` env var, which the `Dockerfile`'s
+   `CMD` reads (falling back to `8000` for local `docker run` with no `PORT`
+   set) — verified locally by running the built image with and without an
+   explicit `PORT` override before deploying.
+5. Verify `GET /healthz` returns `{"status": "ok"}`, then a real profile
+   lookup against `POST /api/v1/profile`.
+
+**Free-tier cold start:** Render's free tier sleeps a service after ~15
+minutes of inactivity. The first request after that takes 30-50s while it
+spins back up — expected behavior, not a bug, if a request seems to hang
+briefly on first try.
 
 ## API
 
@@ -549,14 +577,17 @@ Error responses from this API's own logic share one shape
 | 401 | Session cookie missing/expired/checkpointed |
 | 403 | Profile private / out of network / account restricted |
 | 404 | Profile doesn't exist |
+| 422 | Malformed request body (e.g. missing the `url` field) |
 | 429 | LinkedIn is rate-limiting this account |
 | 502 | Request to LinkedIn timed out/failed at the network level, or LinkedIn returned an unexpected status |
 
-One exception: `422` (malformed request body — e.g. missing the `url`
-field) is FastAPI's own built-in request-validation response, shaped
-differently (`{"detail": [{"type": ..., "loc": ..., "msg": ..., ...}]}`) —
-confirmed via a direct curl against the running app. Not worth overriding
-FastAPI's own validation just to force a shape match.
+`422` is the one status not raised by this API's own `LinkedInClientError`
+hierarchy — it's FastAPI's own built-in request-validation error instead
+(triggered before any of our code runs). By default that has a different
+shape (`{"detail": [{"type": ..., "loc": ..., "msg": ..., ...}]}`) — found
+via a direct curl against the running app — so `handle_validation_error` in
+`main.py` reformats it into the same `{"error", "detail"}` contract as
+every other error case, rather than leaving one status inconsistent.
 
 ### `GET /healthz`
 
@@ -604,12 +635,17 @@ Liveness check for deployment platforms.
   `start`/`count` in the request body; only `start=0` is fetched, so a profile
   with more than 10 skills will be missing the rest. Extending this to loop
   until an empty page would be a small, mechanical follow-up.
-- **`/certifications` likely paginates too, and silently returns a partial
-  list with no indication more exist.** Confirmed live on a profile with 12
-  real certifications where only 6 came back — unlike Skills, this endpoint's
-  pagination mechanism (whether it even accepts `start`/`count`, and under
-  what parameter names) hasn't been reverse-engineered, so this is
-  documented rather than guessed at.
+- **`/certifications` doesn't expose every credential the page UI shows, and
+  this isn't a pagination gap.** Confirmed live on a profile with 12 real
+  certifications where only 6 come back (`scripts/probe_certifications_pagination.py`):
+  `count=25` and `start=0&count=25` return the exact same 6 (the endpoint
+  ignores those params outright), and `start=6`/`start=10` return **0**, not
+  the remaining 6 — if this were a real paginated list of 12, `start=6`
+  would return the second half. This endpoint's actual dataset simply only
+  has 6 entries; the other 6 the page shows must come from a different
+  credential type or mechanism entirely, undiscovered — the same scale of
+  investigation that found Experience/Education/Skills' SDUI endpoints,
+  not a small follow-up like Skills' pagination is.
 - **Education and Skills additionally depend on a MiniProfile entity being
   available** (same opportunistic source as headline/photo — see below) to
   supply the profile's encoded id, which both their requests require. A

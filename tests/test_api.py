@@ -79,6 +79,20 @@ def test_maps_linkedin_errors_to_http_status(monkeypatch, exc, expected_status):
     assert response.status_code == expected_status
 
 
+def test_malformed_body_matches_error_response_shape():
+    # A missing required field triggers FastAPI's own request-validation
+    # handling, not our LinkedInClientError path — confirmed live via curl
+    # that its default shape ({"detail": [...]}) doesn't match this API's
+    # documented {"error", "detail"} contract. handle_validation_error
+    # reformats it to match.
+    response = client.post("/api/v1/profile", json={"not_url": "oops"})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"] == "ValidationError"
+    assert "url" in body["detail"]
+
+
 def test_healthz():
     response = client.get("/healthz")
     assert response.status_code == 200

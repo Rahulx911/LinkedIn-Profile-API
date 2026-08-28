@@ -1,6 +1,7 @@
 import re
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.cache import TTLCache
@@ -95,4 +96,21 @@ def handle_linkedin_error(request, exc: LinkedInClientError):
     return JSONResponse(
         status_code=status_code,
         content=ErrorResponse(error=type(exc).__name__, detail=str(exc)).model_dump(),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+def handle_validation_error(request: Request, exc: RequestValidationError):
+    # FastAPI's own built-in handler for this returns {"detail": [...]} —
+    # a differently-shaped body than every other error case here. Reformat
+    # into the same {"error", "detail"} contract instead of leaving one
+    # documented shape inconsistent with the rest (confirmed live via curl
+    # against a malformed request body).
+    messages = [
+        f"{'.'.join(str(p) for p in err['loc'] if p != 'body')}: {err['msg']}"
+        for err in exc.errors()
+    ]
+    return JSONResponse(
+        status_code=422,
+        content=ErrorResponse(error="ValidationError", detail="; ".join(messages)).model_dump(),
     )
