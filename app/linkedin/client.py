@@ -220,13 +220,20 @@ def _extract_mini_profile_id(subresources: dict, public_identifier: str) -> str 
 
 class VoyagerClient:
     def __init__(self, li_at_cookie: str, jsessionid: str | None, timeout: float = 15.0):
-        cookies = {"li_at": li_at_cookie}
+        cookies = {"li_at": li_at_cookie.strip()}
         headers = dict(BASE_HEADERS)
         if jsessionid:
-            # LinkedIn expects the csrf-token header to equal the JSESSIONID
-            # cookie value, quotes included.
-            cookies["JSESSIONID"] = jsessionid
-            headers["csrf-token"] = jsessionid
+            # LinkedIn's JSESSIONID cookie value is wrapped in double quotes
+            # (e.g. "ajax:123..."), and the csrf-token header must equal the
+            # UNQUOTED token. Confirmed live: sending the quoted form as the
+            # csrf-token header gets a 403 with body "CSRF check failed",
+            # while the unquoted form works — the earlier assumption that
+            # quotes should be kept was wrong. Normalize by stripping any
+            # surrounding quotes (and whitespace) so this works whether or
+            # not the env var / .env value includes them.
+            token = jsessionid.strip().strip('"')
+            cookies["JSESSIONID"] = token
+            headers["csrf-token"] = token
         else:
             import sys
 

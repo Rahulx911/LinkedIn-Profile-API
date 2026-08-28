@@ -97,3 +97,20 @@ def test_healthz():
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.parametrize("jsessionid", ['"ajax:1234567890"', "ajax:1234567890", '  "ajax:1234567890"  '])
+def test_csrf_token_is_normalized_to_unquoted_form(jsessionid):
+    # LinkedIn's Voyager API returns 403 "CSRF check failed" when the
+    # csrf-token header carries the surrounding double quotes LinkedIn wraps
+    # the JSESSIONID cookie value in (confirmed live during deployment — see
+    # README). The client must strip them so it works whether the env var is
+    # pasted with quotes, without them, or with stray whitespace.
+    from app.linkedin.client import VoyagerClient
+
+    c = VoyagerClient(li_at_cookie="testcookie", jsessionid=jsessionid)
+    try:
+        assert c._client.headers.get("csrf-token") == "ajax:1234567890"
+        assert c._client.cookies.get("JSESSIONID") == "ajax:1234567890"
+    finally:
+        c.close()

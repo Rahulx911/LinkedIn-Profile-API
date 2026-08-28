@@ -30,11 +30,14 @@ app = FastAPI(
 def _log_startup_config_check(settings) -> None:
     """Safe startup diagnostic — reports whether each secret was actually
     read from the environment, and its length, but NEVER the value itself.
-    A 999 "automated behavior detected" response from LinkedIn looks
-    identical whether the real cause is IP-based bot detection or a
+    A block/denial from LinkedIn looks identical whether the real cause is a
     malformed/truncated cookie (e.g. from a copy-paste into a platform's web
-    form), so this rules the latter in or out from the deployment's own
-    logs without ever exposing the secret in them."""
+    form) or something server-side, so this rules the config out from the
+    deployment's own logs without ever exposing the secret in them. (Both
+    the truncated-cookie 999 and the quoted-JSESSIONID 403 "CSRF check
+    failed" seen during development were caught exactly this way — see
+    README.) Quotes around JSESSIONID no longer matter (the client strips
+    them), so this just reports length now."""
     cookie = settings.li_at_cookie
     print(
         "Startup config check: LI_AT_COOKIE "
@@ -43,10 +46,8 @@ def _log_startup_config_check(settings) -> None:
     )
     jsessionid = settings.jsessionid
     if jsessionid:
-        quoted = jsessionid.startswith('"') and jsessionid.endswith('"')
         print(
-            f"Startup config check: JSESSIONID set ({len(jsessionid)} chars, "
-            + ("has surrounding quotes)" if quoted else "MISSING surrounding quotes — see .env.example)"),
+            f"Startup config check: JSESSIONID set ({len(jsessionid)} chars)",
             file=sys.stderr,
         )
     else:
