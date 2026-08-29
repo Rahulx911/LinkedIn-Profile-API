@@ -14,6 +14,7 @@ never at request time.
   ([health](https://linkedin-profile-api-526f.onrender.com/healthz) ·
   [API docs](https://linkedin-profile-api-526f.onrender.com/docs))
 - **Mirror (Railway):** https://linkedin-profile-api-production-b7c8.up.railway.app
+- **Demo video:** https://drive.google.com/file/d/1DWtoIU_vaZPYUYIzbnQgPB-JMyXHJkfv/view?usp=sharing
 
 ---
 
