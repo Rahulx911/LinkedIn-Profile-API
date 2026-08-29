@@ -158,18 +158,29 @@ exact three retired. So those had to be recovered a different way:
   Experience) and `pagination` (for Education/Skills). This is the experimental,
   could-break-anytime part — see limitations.
 
-**Hardened against 7 real profiles.** The parsers were built and repeatedly
-corrected against seven genuinely different real profiles (self-view and
-third-party, 1st- and 2nd-degree connections, single/multi-role and grouped
-companies, co-authored publications, varied location formats). This caught real
-bugs a single test profile never would — e.g. a co-author's photo being
-returned as the profile owner's, a grouped company's name getting lost across
-its sub-roles, and description text that happened to look like a location.
-The experience title/company logic was ultimately **generalized** (classifying
-the "identity" tokens before each role's date range by count, rather than
-piling on per-layout special cases) so the next unseen layout has a real chance
-of already being covered. Every fix is locked in by a real-fixture regression
-test (`pytest`, all green).
+**Hardened against ~25 real profiles.** The parsers were built and repeatedly
+corrected against a large, deliberately varied set of real profiles (self-view
+and third-party, 1st/2nd/3rd-degree connections, single/multi-role and grouped
+companies, co-authored publications, career breaks, compound employment types,
+and varied date/location formats). This caught real bugs a single test profile
+never would — e.g. a co-author's photo returned as the profile owner's, a
+grouped company's name lost across its sub-roles, description text mistaken for
+a location, compound employment types (`Contract Full-time`) breaking the
+company/type split, a year-only date with an en dash (`2024 – 2024`) being
+dropped, and About returning a Featured post on profiles with no real About.
+Two design principles emerged and are worth calling out:
+
+- **Generalize, don't special-case.** The experience title/company logic
+  classifies the "identity" tokens before each role's date range by count
+  (0/1/2), rather than a growing pile of per-layout lookaheads, so an unseen
+  layout has a real chance of already being covered.
+- **Anchor on LinkedIn's own structural markers where one exists.** About
+  extraction anchors on the expandable "…more" text-block marker that only
+  wraps a genuine About paragraph — so profiles with no real About (just
+  Featured posts or a Top-skills chip) correctly return `null` instead of
+  grabbing unrelated text.
+
+Every fix is locked in by a real-fixture regression test (`pytest`, all green).
 
 <details>
 <summary><b>Deployment debugging: two failures behind a generic error</b></summary>
@@ -241,7 +252,7 @@ The same repo is also mirrored on Railway with the same setup.
   wire format** — reverse-engineered by hand, not a stable API. Any of them can
   break if LinkedIn changes the format; each fetch is isolated so a failure just
   empties that one section. Field accuracy is best-effort, verified against the
-  seven real layouts captured (see Approach). Descriptions are a text-position
+  ~25 real layouts captured (see Approach). Descriptions are a text-position
   heuristic, and occasionally LinkedIn's own stream ordering places a field far
   from the rest of its role — not fixable by a local scan.
 
@@ -260,8 +271,15 @@ The same repo is also mirrored on Railway with the same setup.
 **Conditional / heuristic fields**
 - **`about` / `location`** are heuristic. `location` (top-card) needs the
   `Company · School` line to anchor on, so a single-badge card (just a school,
-  or just a company) → `null`; `about` picks the richest prose cluster and
-  excludes known false positives, but an unusual layout could still mislead it.
+  or just a company) → `null`. `about` anchors on the expandable "…more"
+  text-block marker that wraps a real About paragraph (so profiles with no
+  About — only Featured posts or a Top-skills chip — correctly return `null`);
+  a very short About that has no "…more" expansion may still be missed.
+- **Experience role order and per-role location fidelity are imperfect.**
+  Roles follow LinkedIn's stream order, not a strict reverse-chronological
+  sort (sort by `date_range.start` client-side if needed); and a grouped
+  company's sub-roles may carry a bare workplace type (`On-site`) as their
+  location instead of the city, which sits once on the group header.
 - **A bare single-word/city location** with no state, country, or
   On-site/Remote/Hybrid suffix (e.g. a role listing just `"Bangalore"`) isn't
   reliably recognized — a lone capitalized word is ambiguous with the first
