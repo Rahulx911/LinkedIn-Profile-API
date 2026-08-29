@@ -19,3 +19,6 @@ htmlcov/
 
 .idea/
 .vscode/
+
+# local-only test inputs (real LinkedIn page content — never commit)
+testing/

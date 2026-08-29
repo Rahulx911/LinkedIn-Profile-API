@@ -30,6 +30,15 @@ EXPERIENCE_FLIGHT_THIRDPARTY5_FIXTURE = (
 EXPERIENCE_FLIGHT_THIRDPARTY6_FIXTURE = (
     Path(__file__).parent / "fixtures" / "experience_flight_thirdparty6_sample.txt"
 )
+EXPERIENCE_FLIGHT_THIRDPARTY7_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "experience_flight_thirdparty7_sample.txt"
+)
+EXPERIENCE_FLIGHT_THIRDPARTY8_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "experience_flight_thirdparty8_sample.txt"
+)
+EXPERIENCE_FLIGHT_THIRDPARTY9_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "experience_flight_thirdparty9_sample.txt"
+)
 EDUCATION_FLIGHT_FIXTURE = Path(__file__).parent / "fixtures" / "education_flight_sample.txt"
 EDUCATION_FLIGHT_THIRDPARTY_FIXTURE = (
     Path(__file__).parent / "fixtures" / "education_flight_thirdparty_sample.txt"
@@ -44,6 +53,15 @@ ABOUT_FLIGHT_THIRDPARTY_FIXTURE = (
 )
 ABOUT_FLIGHT_THIRDPARTY2_FIXTURE = (
     Path(__file__).parent / "fixtures" / "about_flight_thirdparty2_sample.txt"
+)
+ABOUT_FLIGHT_NO_ABOUT_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "about_flight_no_about_sample.txt"
+)
+ABOUT_FLIGHT_FEATURED_ONLY_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "about_flight_featured_only_sample.txt"
+)
+ABOUT_FLIGHT_THIRDPARTY3_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "about_flight_thirdparty3_sample.txt"
 )
 PROFILE_HTML_FIXTURE = Path(__file__).parent / "fixtures" / "profile_html_sample.html"
 PROFILE_HTML_THIRDPARTY_FIXTURE = (
@@ -545,6 +563,65 @@ def test_experience_does_not_leak_location_across_unrelated_companies():
     assert by_title["Summer Intern"].location == "Bengaluru, Karnataka, India · On-site"
 
 
+def test_experience_handles_compound_employment_types():
+    # Real response captured live: roles use COMPOUND employment types
+    # ("Contract Full-time", "Permanent Full-time") that aren't in the base
+    # type set. Previously (see git history) "MNP · Contract Full-time"
+    # failed the Company·Type split, leaving the type stuck on the company
+    # name, and it broke the following grouped company (Avangard) whose
+    # sub-roles all took "Permanent Full-time" as their company.
+    text = EXPERIENCE_FLIGHT_THIRDPARTY7_FIXTURE.read_text()
+    experiences = parse_experience_from_flight(text)
+    by_title = {e.title: e for e in experiences}
+
+    assert by_title["Senior AI Engineer"].company == "MNP"
+    assert by_title["AI Engineer / Senior Machine Learning Engineer"].company == "WM"
+    # All four Avangard sub-roles keep the real company name, not the type.
+    for title in [
+        "Lead Data Scientist",
+        "Senior Machine Learning Engineer",
+        "Machine Learning Engineer",
+        "Data Scientist",
+    ]:
+        assert by_title[title].company == "Avangard Innovative", title
+
+
+def test_experience_does_not_swallow_a_following_grouped_company():
+    # Real response captured live: a grouped company (Houseware, then
+    # Students' Union) follows a single-role company with no employment type
+    # (LaunchDarkly). Previously (see git history) the description loop ate
+    # the next company's bare name + duration line as description text, so
+    # the stale previous company (LaunchDarkly) leaked onto every grouped
+    # sub-role.
+    text = EXPERIENCE_FLIGHT_THIRDPARTY8_FIXTURE.read_text()
+    experiences = parse_experience_from_flight(text)
+    by_title = {e.title: e for e in experiences}
+
+    assert by_title["Software Engineer"].company == "LaunchDarkly"
+    assert by_title["Backend Engineering Intern"].company == "Houseware"
+    assert by_title["Full Stack Developer"].company.startswith("Students")
+    # No role should carry LaunchDarkly except the one that's really there.
+    assert [e.title for e in experiences if e.company == "LaunchDarkly"] == ["Software Engineer"]
+
+
+def test_experience_accepts_en_dash_year_only_date_range():
+    # Real response captured live: a role's whole tenure sits in one calendar
+    # year and renders as "2024 – 2024" with an EN DASH, not the usual hyphen.
+    # Previously (see git history) the date regex only accepted a hyphen, so
+    # the role was silently dropped and its title leaked onto the next role.
+    text = EXPERIENCE_FLIGHT_THIRDPARTY9_FIXTURE.read_text()
+    experiences = parse_experience_from_flight(text)
+    by_title = {e.title: e for e in experiences}
+
+    assert "Founding Engineer" in by_title
+    bharatx = by_title["Founding Engineer"]
+    assert bharatx.company == "BharatX"
+    assert bharatx.date_range.start == "2024"
+    assert bharatx.date_range.end == "2024"
+    # The role that used to steal the dropped title is now labelled correctly.
+    assert by_title["Entrepreneur in Residence"].company == "Entrepreneur First"
+
+
 def test_experience_parser_never_raises_on_garbage_input():
     assert parse_experience_from_flight("not a real flight response") == []
     assert parse_experience_from_flight("") == []
@@ -585,6 +662,38 @@ def test_parses_about_from_real_captured_flight_response():
         "ML-integrated microservices at Delhivery. Semi-finalist at "
         "Flipkart Grid 6.0."
     )
+
+
+def test_about_returns_none_when_profile_has_no_about_section():
+    # Real response captured live from a profile with NO About section. The
+    # above_activity response still carries Featured posts, a Services blurb,
+    # a Top-skills chip line, and a "mutual connections" prompt — previously
+    # (see git history) the clustering returned one of those (a GitHub
+    # Featured-link caption) as the "about". LinkedIn only renders the
+    # standalone "About" h2 heading when the section has content, so its
+    # absence now gates extraction to None.
+    text = ABOUT_FLIGHT_NO_ABOUT_FIXTURE.read_text()
+    assert parse_about_from_flight(text) is None
+
+
+def test_about_returns_none_when_about_section_has_no_prose():
+    # Real response captured live from a profile whose About section exists
+    # (an "About" heading is rendered) but holds ONLY a Top-skills chip line,
+    # no prose paragraph — and the same response carries a long Featured math
+    # post. Previously (see git history) that Featured post was returned as
+    # the "about"; the expandable-"…more"-marker anchor now correctly returns
+    # None because no real About paragraph exists.
+    text = ABOUT_FLIGHT_FEATURED_ONLY_FIXTURE.read_text()
+    assert parse_about_from_flight(text) is None
+
+
+def test_about_extracted_via_expandable_anchor_on_real_profile():
+    # Real capture with a genuine single-paragraph About — sanity check that
+    # the expandable-marker anchor still extracts real About text.
+    text = ABOUT_FLIGHT_THIRDPARTY3_FIXTURE.read_text()
+    about = parse_about_from_flight(text)
+    assert about is not None
+    assert about.startswith("Shubham is an Engineer at LaunchDarkly")
 
 
 def test_about_parser_never_raises_on_garbage_input():

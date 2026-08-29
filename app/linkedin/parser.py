@@ -217,8 +217,13 @@ def _parse_bonus_section(raw: dict | None, resource: str) -> list[BonusItem]:
     return items
 
 
+# Separator is normally a hyphen ("Jan 2025 - Jun 2026"), but a year-only
+# range can use an en dash ("2024 – 2024") — confirmed live on a role whose
+# whole tenure was inside one calendar year. Accept hyphen, en dash, or em
+# dash so that role isn't silently dropped (which also mis-attributed its
+# title to the next role).
 _DATE_RANGE_RE = re.compile(
-    r"^([A-Z][a-z]{2} \d{4}|\d{4}) - (Present|[A-Z][a-z]{2} \d{4}|\d{4})(?:\s*·\s*.+)?$"
+    r"^([A-Z][a-z]{2} \d{4}|\d{4}) [-–—] (Present|[A-Z][a-z]{2} \d{4}|\d{4})(?:\s*·\s*.+)?$"
 )
 # A role active less than a month shows as a single date, no range, e.g.
 # "Aug 2026 · 1 mo" — confirmed live on a just-started role.
@@ -292,18 +297,36 @@ def _is_location_token(token: str) -> bool:
 
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-_EMPLOYMENT_TYPES = {
+_BASE_EMPLOYMENT_TYPES = {
     "Full-time", "Part-time", "Internship", "Contract", "Freelance",
     "Self-employed", "Trainee", "Apprenticeship", "Seasonal",
 }
-_COMPANY_TYPE_RE = re.compile(
-    r"^(.+?) · (" + "|".join(re.escape(t) for t in _EMPLOYMENT_TYPES) + r")$"
+# LinkedIn also renders COMPOUND employment types that pair a contract nature
+# with a schedule, e.g. "Contract Full-time" / "Permanent Full-time" —
+# confirmed live on a profile whose roles used exactly these. They're not in
+# the base set, so "Company · Contract Full-time" failed the Company·Type
+# split (leaving the type stuck on the company name) and broke the state
+# machine for the grouped company that followed. Generated from the cross
+# product of the contract qualifiers and the two schedules.
+_EMPLOYMENT_TYPE_QUALIFIERS = ("Contract", "Permanent", "Temporary")
+_EMPLOYMENT_TYPE_SCHEDULES = ("Full-time", "Part-time")
+_COMPOUND_EMPLOYMENT_TYPES = {
+    f"{q} {s}" for q in _EMPLOYMENT_TYPE_QUALIFIERS for s in _EMPLOYMENT_TYPE_SCHEDULES
+}
+_EMPLOYMENT_TYPES = _BASE_EMPLOYMENT_TYPES | _COMPOUND_EMPLOYMENT_TYPES
+# Compound types must come first in the regex alternation so "Contract
+# Full-time" is preferred over the bare "Contract"/"Full-time" at the same
+# position (the $ anchor would still backtrack to it, but ordering makes the
+# intent explicit and avoids depending on set iteration order).
+_EMPLOYMENT_TYPES_PATTERN = "|".join(
+    re.escape(t) for t in sorted(_EMPLOYMENT_TYPES, key=len, reverse=True)
 )
+_COMPANY_TYPE_RE = re.compile(r"^(.+?) · (" + _EMPLOYMENT_TYPES_PATTERN + r")$")
 # A grouped multi-role company's aggregate summary line — shown once at the
 # top of the group when every sub-role shares the same employment type (see
 # _is_bare_company_confirmation docstring below), e.g. "Full-time · 1 yr 8 mos".
 _TYPE_DURATION_AGGREGATE_RE = re.compile(
-    r"^(" + "|".join(re.escape(t) for t in _EMPLOYMENT_TYPES) + r") · (.+)$"
+    r"^(" + _EMPLOYMENT_TYPES_PATTERN + r") · (.+)$"
 )
 _HASH_CLASS_RE = re.compile(r"^[_a-f0-9]{6,}( [_a-f0-9]{6,})*$")
 _NOISE_TOKENS = {"more", "Expanded", "Collapsed", "br", "open"}
@@ -591,6 +614,17 @@ def parse_experience_from_flight(raw_text: str | None) -> list[Experience]:
                         or _COMPANY_TYPE_RE.match(nxt_next)
                         or _DATE_RANGE_RE.match(nxt_next)
                         or _DATE_SINGLE_RE.match(nxt_next)
+                        # nxt is a bare company name starting a GROUPED company:
+                        # a duration badge ("3 yrs 3 mos") or "<Type> · <dur>"
+                        # aggregate only ever follows a company name, so this
+                        # marks the next company block — stop so the outer loop
+                        # picks the company up instead of eating it as this
+                        # role's description. Confirmed live: a grouped company
+                        # (Houseware) right after a no-type single-role company
+                        # (LaunchDarkly) was being swallowed, leaking the stale
+                        # previous company onto every grouped sub-role.
+                        or _DURATION_ONLY_RE.match(nxt_next)
+                        or _TYPE_DURATION_AGGREGATE_RE.match(nxt_next)
                     ):
                         break
                     if not _is_role_landmark(nxt_next):
@@ -899,8 +933,24 @@ def parse_about_from_flight(raw_text: str | None) -> str | None:
     raw length. Excluded by checking for the literal `"Urn("` substring any
     real prose would never contain.
 
-    Still a heuristic, not a real field, and verified against four profiles
-    — see README known limitations. Never raises."""
+    ANCHOR: this `above_activity` response ALSO carries Featured posts, a
+    Services blurb, a Top-skills chip line, and a "mutual connections" prompt
+    — so "the richest prose cluster anywhere" returned one of those on a
+    profile with no real About paragraph (confirmed live: a GitHub
+    Featured-link caption, a Featured post's body, the Top-skills line, and —
+    trickiest — a Featured math post on a profile whose About section existed
+    but held only a Top-skills chip, no prose). The reliable distinguisher:
+    the real About paragraph is always rendered inside an expandable
+    "…more" text block (`expandable_text_block_auto-component-…`), and
+    Featured/Services/Skills content is NOT. So anchor on the FIRST such
+    marker (About is the topmost section that uses it); no marker → no About
+    paragraph → None. The About paragraphs are then the last proximity
+    cluster sitting just before that marker (a multi-paragraph About is
+    several tokens; the marker follows the final one). The Top-skills line
+    (bullet-separated with " • ") is also excluded outright.
+
+    Still a heuristic, not a real field, and verified against several
+    profiles — see README known limitations. Never raises."""
     if not raw_text:
         return None
 
@@ -918,20 +968,42 @@ def parse_about_from_flight(raw_text: str | None) -> str | None:
             and not _is_noise_token(tok)
             and not tok.startswith(("http", "com.linkedin", "proto.", "You both "))
             and "Urn(" not in tok
+            and " • " not in tok  # the Top-skills chip line, not About prose
         )
     ]
     if not candidates:
         return None
 
-    clusters: list[list[tuple[int, str]]] = [[candidates[0]]]
-    for idx, tok in candidates[1:]:
-        if idx - clusters[-1][-1][0] <= _ABOUT_CLUSTER_GAP:
-            clusters[-1].append((idx, tok))
-        else:
-            clusters.append([(idx, tok)])
+    # The real About paragraph is always FOLLOWED within a few tokens by an
+    # expandable "…more" text block marker; Featured/Services/Skills prose is
+    # not. (The stream also has an earlier such marker in its skeleton, so we
+    # can't just take the first marker overall — we look for a prose
+    # candidate that HAS a marker right after it.) On a multi-paragraph
+    # About only the last paragraph is directly followed by the marker, so
+    # the anchor marks the END of the About block.
+    def _followed_by_expandable(idx: int, window: int = 15) -> bool:
+        for k in range(idx + 1, min(idx + window, len(tokens))):
+            if tokens[k].startswith("expandable_text_block_auto-component-"):
+                return True
+        return False
 
-    best = max(clusters, key=lambda c: sum(len(t) for _, t in c))
-    return " ".join(tok for _, tok in best)
+    anchor_pos = next((i for i, _ in candidates if _followed_by_expandable(i)), None)
+    if anchor_pos is None:
+        return None
+
+    # Gather the About block: the contiguous proximity cluster of candidates
+    # ending at the anchor (its earlier paragraphs walking backward while
+    # still within the cluster gap).
+    block: list[tuple[int, str]] = []
+    prev_idx = None
+    for idx, tok in candidates:
+        if idx > anchor_pos:
+            break
+        if prev_idx is not None and idx - prev_idx > _ABOUT_CLUSTER_GAP:
+            block = []  # a gap resets — keep only the run leading up to the anchor
+        block.append((idx, tok))
+        prev_idx = idx
+    return " ".join(tok for _, tok in block)
 
 
 def parse_profile(raw: dict, public_identifier: str) -> ProfileResponse:
